@@ -1,4 +1,5 @@
 #include <esp_event.h>
+#include <string.h>
 #include <esp_log.h>
 #include <esp_system.h>
 #include <nvs_flash.h>
@@ -17,8 +18,10 @@
 #define UART_BUFFER_SIZE   (2048)
 #define CHUNK_SIZE         (512)
 
-static const char *TAG = "example_take_picture";
-QueueHandle_t queue;
+static const char *TAG = "uart_test";
+static QueueHandle_t uart_queue;
+static volatile bool command_received = false;
+static char rx_buffer[128];
 
 static camera_config_t photo_config = {
     .pin_pwdn = CONFIG_PWDN,
@@ -56,8 +59,7 @@ typedef struct {
     size_t len;
 } picture_t;
 
-static void uart_transmit_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Starting UART transmit task");
+static void uart_init(void) {
     const uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -68,101 +70,136 @@ static void uart_transmit_task(void *pvParameters) {
         .source_clk = UART_SCLK_APB,
     };
 
-    esp_err_t err = uart_driver_install(UART_PORT_NUM, UART_BUFFER_SIZE * 2, 0, 0, NULL, 0);
+    esp_err_t err = uart_driver_install(UART_PORT_NUM, UART_BUFFER_SIZE * 2, UART_BUFFER_SIZE * 2, 10, &uart_queue, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART driver install failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        return;
     }
     err = uart_param_config(UART_PORT_NUM, &uart_config);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART config failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        return;
     }
     err = uart_set_pin(UART_PORT_NUM, TXD_PIN, RXD_PIN, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART set pin failed: %s", esp_err_to_name(err));
-        vTaskDelete(NULL);
+        return;
+    }
+
+    err = uart_enable_rx_intr(UART_PORT_NUM);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "UART RX interrupt enable failed: %s", esp_err_to_name(err));
+        return;
     }
 
     ESP_LOGI(TAG, "UART initialized");
-    while (1) {
-        picture_t *picture;
-        if (xQueueReceive(queue, &picture, portMAX_DELAY)) {
-            ESP_LOGI(TAG, "Transmitting image: %u bytes", picture->len);
-            uint32_t image_size = picture->len;
-            int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
-            if (sent != sizeof(image_size)) {
-                ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
-            }
+}
 
-            size_t bytes_sent = 0;
-            while (bytes_sent < picture->len) {
-                size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
-                sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
-                if (sent < 0) {
-                    ESP_LOGE(TAG, "UART transmission error at %u bytes", bytes_sent);
-                    break;
-                }
-                bytes_sent += sent;
-                ESP_LOGD(TAG, "Sent %d bytes, total %u/%u", sent, bytes_sent, picture->len);
-                vTaskDelay(20 / portTICK_PERIOD_MS);
-            }
-
-            free(picture->buf);
-            free(picture);
-            ESP_LOGI(TAG, "Image transmission complete");
-        }
+static void send_ready_message(void) {
+    const char *ready_msg = "READY\r\n";
+    int sent = uart_write_bytes(UART_PORT_NUM, ready_msg, strlen(ready_msg));
+    if (sent < 0) {
+        ESP_LOGE(TAG, "Failed to send READY message");
+    } else {
+        ESP_LOGI(TAG, "Sent READY message");
     }
 }
 
-static void take_picture_task(void *pvParameters) {
-    ESP_LOGI(TAG, "Starting take picture task");
-    ESP_ERROR_CHECK(esp_camera_init(&photo_config));
-    while (1) {
-        // int64_t timestamp = esp_timer_get_time();
-        camera_fb_t *pic = esp_camera_fb_get();
-        if (!pic) {
-            ESP_LOGE(TAG, "Failed to capture image");
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            continue;
-        }
+static void send_image(const picture_t *picture) {
+    ESP_LOGI(TAG, "Transmitting image: %u bytes", picture->len);
+    uint32_t image_size = picture->len;
+    int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
+    if (sent != sizeof(image_size)) {
+        ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
+        return;
+    }
 
-        picture_t *picture = malloc(sizeof(picture_t));
-        if (picture == NULL) {
-            ESP_LOGE(TAG, "Error allocating picture struct");
-            esp_camera_fb_return(pic);
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            continue;
+    size_t bytes_sent = 0;
+    while (bytes_sent < picture->len) {
+        size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
+        sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
+        if (sent < 0) {
+            ESP_LOGE(TAG, "UART transmission error at %u bytes", bytes_sent);
+            break;
         }
+        bytes_sent += sent;
+        ESP_LOGD(TAG, "Sent %d bytes, total %u/%u", sent, bytes_sent, picture->len);
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+    ESP_LOGI(TAG, "Image transmission complete");
+}
 
-        uint8_t *buf = malloc(pic->len);
-        if (buf == NULL) {
-            ESP_LOGE(TAG, "Error allocating picture buffer");
-            free(picture);
-            esp_camera_fb_return(pic);
-            vTaskDelay(1000 / portTICK_PERIOD_MS);
-            continue;
-        }
+static picture_t* capture_image(void) {
+    camera_fb_t *pic = esp_camera_fb_get();
+    if (!pic) {
+        ESP_LOGE(TAG, "Failed to capture image");
+        return NULL;
+    }
 
-        for (int i = 0; i < pic->len; i++) {
-        buf[i] = pic->buf[i];
-        }
-        picture->buf = buf;
-        picture->len = pic->len;
-        ESP_LOGI(TAG, "Captured image: %u bytes", picture->len);
-
-        if (xQueueSend(queue, &picture, portMAX_DELAY) != pdTRUE) {
-            ESP_LOGE(TAG, "Failed to send image to queue");
-            free(picture->buf);
-            free(picture);
-        }
+    picture_t *picture = malloc(sizeof(picture_t));
+    if (picture == NULL) {
+        ESP_LOGE(TAG, "Error allocating picture struct");
         esp_camera_fb_return(pic);
-        // ESP_LOGI(TAG, "Time to take picture: %lld us", esp_timer_get_time() - timestamp);
-        vTaskDelay(5000 / portTICK_PERIOD_MS); // Capture every 5 seconds
+        return NULL;
+    }
+
+    uint8_t *buf = malloc(pic->len);
+    if (buf == NULL) {
+        ESP_LOGE(TAG, "Error allocating picture buffer");
+        free(picture);
+        esp_camera_fb_return(pic);
+        return NULL;
+    }
+
+    memcpy(buf, pic->buf, pic->len);
+    picture->buf = buf;
+    picture->len = pic->len;
+    esp_camera_fb_return(pic);
+    ESP_LOGI(TAG, "Captured image: %u bytes", picture->len);
+    return picture;
+}
+
+static void uart_rx_task(void *pvParameters) {
+    uart_event_t event;
+    size_t buffered_size;
+
+    while (1) {
+        if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
+            if (event.type == UART_DATA) {
+                int len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);
+                if (len > 0) {
+                    rx_buffer[len] = 0;
+                    ESP_LOGI(TAG, "Received: %s", rx_buffer);
+                    if (strstr(rx_buffer, "TAKE_PICTURE") != NULL) {
+                        command_received = true;
+                    }
+                }
+            } else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL) {
+                ESP_LOGW(TAG, "UART buffer overflow, flushing");
+                uart_flush_input(UART_PORT_NUM);
+                xQueueReset(uart_queue);
+            }
+        }
     }
 }
 
-void app_main() {
+static void command_task(void *pvParameters) {
+    while (1) {
+        if (command_received) {
+            picture_t *picture = capture_image();
+            if (picture) {
+                send_image(picture);
+                free(picture->buf);
+                free(picture);
+            }
+            command_received = false;
+            send_ready_message();
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
+void app_main(void) {
     ESP_LOGI(TAG, "Starting application");
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -171,12 +208,10 @@ void app_main() {
     }
     ESP_ERROR_CHECK(ret);
 
-    queue = xQueueCreate(CONFIG_PICTURE_QUEUE_SIZE, sizeof(picture_t *));
-    if (queue == NULL) {
-        ESP_LOGE(TAG, "Error creating the queue");
-        ESP_ERROR_CHECK(ESP_FAIL);
-    }
+    uart_init();
+    ESP_ERROR_CHECK(esp_camera_init(&photo_config));
+    send_ready_message();
 
-    xTaskCreatePinnedToCore(take_picture_task, "take_picture", 12288, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(uart_transmit_task, "uart_transmit", 4096, NULL, 2, NULL, 1);
+    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(command_task, "command_task", 8192, NULL, 1, NULL, 1); // Increased stack for camera
 }
