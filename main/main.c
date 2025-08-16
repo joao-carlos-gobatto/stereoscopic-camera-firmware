@@ -13,11 +13,12 @@
 
 #include "esp_camera.h"
 
-#define UART_PORT_NUM      UART_NUM_0  // Use UART0 for USB-serial
-#define TXD_PIN            1           // GPIO1 (TX for USB-serial)
-#define RXD_PIN            3           // GPIO3 (RX for USB-serial)
-#define UART_BUFFER_SIZE   (2048)
-#define CHUNK_SIZE         (512)
+#define UART_PORT_NUM       UART_NUM_0  // Use UART0 for USB-serial
+#define TXD_PIN             1           // GPIO1 (TX for USB-serial)
+#define RXD_PIN             3           // GPIO3 (RX for USB-serial)
+#define UART_BUFFER_SIZE    (4096)
+#define CHUNK_SIZE          (2048)
+#define DUMMY_FRAMES        50
 
 static const char *TAG = "uart_test";
 static QueueHandle_t uart_queue;
@@ -30,7 +31,6 @@ static camera_config_t photo_config = {
     .pin_xclk = CONFIG_XCLK,
     .pin_sscb_sda = CONFIG_SDA,
     .pin_sscb_scl = CONFIG_SCL,
-
     .pin_d7 = CONFIG_D7,
     .pin_d6 = CONFIG_D6,
     .pin_d5 = CONFIG_D5,
@@ -42,17 +42,13 @@ static camera_config_t photo_config = {
     .pin_vsync = CONFIG_VSYNC,
     .pin_href = CONFIG_HREF,
     .pin_pclk = CONFIG_PCLK,
-
-    //XCLK 20MHz or 10MHz
     .xclk_freq_hz = CONFIG_XCLK_FREQ,
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
-
-    .pixel_format = PIXFORMAT_JPEG, //YUV422,GRAYSCALE,RGB565,JPEG
-    .frame_size = FRAMESIZE_UXGA,   //QQVGA-UXGA Do not use sizes above QVGA when not JPEG
-
-    .jpeg_quality = 12, //0-63 lower number means higher quality
-    .fb_count = 1       //if more than one, i2s runs in continuous mode. Use only with JPEG
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size = FRAMESIZE_UXGA,
+    .jpeg_quality = 12,
+    .fb_count = 1
 };
 
 typedef struct {
@@ -62,7 +58,7 @@ typedef struct {
 
 static void uart_init(void) {
     const uart_config_t uart_config = {
-        .baud_rate = 115200,
+        .baud_rate = 460800,
         .data_bits = UART_DATA_8_BITS,
         .parity = UART_PARITY_DISABLE,
         .stop_bits = UART_STOP_BITS_1,
@@ -173,7 +169,6 @@ static picture_t* capture_image(void) {
 
 static void uart_rx_task(void *pvParameters) {
     uart_event_t event;
-    size_t buffered_size;
 
     while (1) {
         if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
@@ -225,8 +220,32 @@ void app_main(void) {
 
     uart_init();
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
+
+    // Camera warm-up
+    sensor_t *s = esp_camera_sensor_get();  // Get sensor handle to optionally tweak auto settings
+    if (s != NULL) {
+        // Ensure auto-exposure and white balance are enabled
+        s->set_exposure_ctrl(s, 1);  // Enable auto-exposure
+        s->set_aec2(s, 1);           // Enable DSP auto-exposure for faster adjustment
+        s->set_ae_level(s, 0);       // Neutral auto-exposure level (-2 to 2; increase to 1 or 2 if still too dark in dim light)
+        s->set_gain_ctrl(s, 1);      // Enable auto-gain
+        s->set_whitebal(s, 1);       // Enable auto-white balance
+        s->set_awb_gain(s, 1);       // Enable AWB gain
+        s->set_wb_mode(s, 0);        // Auto WB mode
+    }
+
+    ESP_LOGI(TAG, "Warming up camera...");
+    for (int i = 0; i < DUMMY_FRAMES; i++) {  // Takes dummy frames to stabilize the camera sensors.
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) {
+            esp_camera_fb_return(fb);  // Discard the frame
+        }
+        vTaskDelay(100 / portTICK_PERIOD_MS);  // 150ms delay per frame for stabilization
+    }
+    ESP_LOGI(TAG, "Camera warmed up");
+
     send_ready_message();
 
-    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 4096, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(command_task, "command_task", 8192, NULL, 1, NULL, 1); // Increased stack for camera
+    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 8192, NULL, 2, NULL, 0);
+    xTaskCreatePinnedToCore(command_task, "command_task", 16384, NULL, 1, NULL, 1); // Increased stack for camera
 }
