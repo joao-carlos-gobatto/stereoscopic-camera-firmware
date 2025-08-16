@@ -4,6 +4,7 @@
 #include <esp_system.h>
 #include <nvs_flash.h>
 #include <sys/param.h>
+#include <esp_crc.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -114,6 +115,18 @@ static void send_image(const picture_t *picture) {
         return;
     }
 
+    // Calculate CRC32
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < picture->len; i++) {
+        crc = esp_crc32_le(crc, &picture->buf[i], 1);
+    }
+    crc ^= 0xFFFFFFFF;
+    sent = uart_write_bytes(UART_PORT_NUM, (const char*)&crc, sizeof(crc));
+    if (sent != sizeof(crc)) {
+        ESP_LOGE(TAG, "Failed to send CRC: %d bytes sent", sent);
+        return;
+    }
+
     size_t bytes_sent = 0;
     while (bytes_sent < picture->len) {
         size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
@@ -123,8 +136,7 @@ static void send_image(const picture_t *picture) {
             break;
         }
         bytes_sent += sent;
-        ESP_LOGD(TAG, "Sent %d bytes, total %u/%u", sent, bytes_sent, picture->len);
-        vTaskDelay(20 / portTICK_PERIOD_MS);
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Increased delay for stability
     }
     ESP_LOGI(TAG, "Image transmission complete");
 }
@@ -191,8 +203,11 @@ static void command_task(void *pvParameters) {
                 send_image(picture);
                 free(picture->buf);
                 free(picture);
+                ESP_LOGI(TAG, "Resources freed, preparing to send READY");
+                vTaskDelay(100 / portTICK_PERIOD_MS); // Delay to stabilize
             }
             command_received = false;
+            uart_flush_input(UART_PORT_NUM); // Clear RX buffer
             send_ready_message();
         }
         vTaskDelay(10 / portTICK_PERIOD_MS);
