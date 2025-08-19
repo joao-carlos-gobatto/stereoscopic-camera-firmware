@@ -5,10 +5,12 @@
 #include <nvs_flash.h>
 #include <sys/param.h>
 #include <esp_crc.h>
+#include <stdio.h>  // For sscanf
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"  // For mutex
 #include "driver/uart.h"
 
 #include "esp_camera.h"
@@ -18,12 +20,19 @@
 #define RXD_PIN             3           // GPIO3 (RX for USB-serial)
 #define UART_BUFFER_SIZE    (4096)
 #define CHUNK_SIZE          (2048)
-#define DUMMY_FRAMES        50
+#define STABILIZE_FRAMES        30
 
 static const char *TAG = "uart_test";
 static QueueHandle_t uart_queue;
-static volatile bool command_received = false;
+static SemaphoreHandle_t take_picture_mutex;  // Mutex for take_picture_flag
+static volatile bool take_picture_flag = false;
 static char rx_buffer[128];
+
+typedef enum {
+    CMD_TAKE_PICTURE = 0,
+    CMD_SET_FRAMESIZE = 1,
+    CMD_INVALID = 0xFF
+} command_t;
 
 static camera_config_t photo_config = {
     .pin_pwdn = CONFIG_PWDN,
@@ -102,6 +111,16 @@ static void send_ready_message(void) {
     }
 }
 
+static void send_ok_message(void) {
+    const char *ok_msg = "OK\r\n";
+    uart_write_bytes(UART_PORT_NUM, ok_msg, strlen(ok_msg));
+}
+
+static void send_error_message(void) {
+    const char *error_msg = "ERROR\r\n";
+    uart_write_bytes(UART_PORT_NUM, error_msg, strlen(error_msg));
+}
+
 static void send_image(const picture_t *picture) {
     ESP_LOGI(TAG, "Transmitting image: %u bytes", picture->len);
     uint32_t image_size = picture->len;
@@ -169,30 +188,105 @@ static picture_t* capture_image(void) {
 
 static void uart_rx_task(void *pvParameters) {
     uart_event_t event;
-
     while (1) {
         if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
-            if (event.type == UART_DATA) {
-                int len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);
-                if (len > 0) {
-                    rx_buffer[len] = 0;
-                    ESP_LOGI(TAG, "Received: %s", rx_buffer);
-                    if (strstr(rx_buffer, "TAKE_PICTURE") != NULL) {
-                        command_received = true;
+            switch (event.type) {
+                case UART_DATA:
+                    {
+                        uint8_t cmd_byte;
+                        int len = uart_read_bytes(UART_PORT_NUM, &cmd_byte, 1, 0);  // Read command byte
+                        if (len == 1) {
+                            len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);  // Read command string
+                            if (len > 0) {
+                                rx_buffer[len] = 0;
+                                ESP_LOGI(TAG, "Received command byte: %d, data: %s", cmd_byte, rx_buffer);
+
+                                // Determine command based on byte
+                                command_t cmd = (command_t)cmd_byte;
+                                switch (cmd) {
+                                    case CMD_TAKE_PICTURE:
+                                        if (strstr(rx_buffer, "TAKE_PICTURE") != NULL) {
+                                            if (xSemaphoreTake(take_picture_mutex, portMAX_DELAY) == pdTRUE) {
+                                                take_picture_flag = true;
+                                                xSemaphoreGive(take_picture_mutex);
+                                            }
+                                        } else {
+                                            ESP_LOGE(TAG, "Invalid TAKE_PICTURE format");
+                                            send_error_message();
+                                        }
+                                        break;
+
+                                    case CMD_SET_FRAMESIZE:
+                                        if (strncmp(rx_buffer, "SET_FRAMESIZE", 13) == 0) {
+                                            int framesize_val;
+                                            if (sscanf(rx_buffer, "SET_FRAMESIZE %d", &framesize_val) == 1) {
+                                                sensor_t *s = esp_camera_sensor_get();
+                                                if (s != NULL) {
+                                                    int res = s->set_framesize(s, (framesize_t)framesize_val);
+                                                    if (res == 0) {
+                                                        // Stabilize with dummy frames after change
+                                                        ESP_LOGI(TAG, "Stabilizing after framesize change...");
+                                                        for (int i = 0; i < STABILIZE_FRAMES; i++) {
+                                                            camera_fb_t *fb = esp_camera_fb_get();
+                                                            if (fb) {
+                                                                esp_camera_fb_return(fb);
+                                                            }
+                                                            vTaskDelay(100 / portTICK_PERIOD_MS);
+                                                        }
+                                                        ESP_LOGI(TAG, "Stabilization complete");
+                                                        send_ok_message();
+                                                    } else {
+                                                        ESP_LOGE(TAG, "Failed to set framesize: %d", res);
+                                                        send_error_message();
+                                                    }
+                                                } else {
+                                                    send_error_message();
+                                                }
+                                            } else {
+                                                ESP_LOGE(TAG, "Invalid SET_FRAMESIZE command");
+                                                send_error_message();
+                                            }
+                                        }
+                                        break;
+
+                                    default:
+                                        ESP_LOGW(TAG, "Unknown command byte: %d", cmd_byte);
+                                        send_error_message();
+                                        break;
+                                }
+                            }
+                        }
                     }
-                }
-            } else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL) {
-                ESP_LOGW(TAG, "UART buffer overflow, flushing");
-                uart_flush_input(UART_PORT_NUM);
-                xQueueReset(uart_queue);
+                    break;
+
+                case UART_FIFO_OVF:
+                case UART_BUFFER_FULL:
+                    ESP_LOGW(TAG, "UART buffer overflow, flushing");
+                    uart_flush_input(UART_PORT_NUM);
+                    xQueueReset(uart_queue);
+                    break;
+
+                default:
+                    // Ignore other event types for now
+                    break;
             }
         }
     }
 }
 
-static void command_task(void *pvParameters) {
+static void picture_task(void *pvParameters) {
     while (1) {
-        if (command_received) {
+        bool local_take_picture_flag;
+        if (xSemaphoreTake(take_picture_mutex, portMAX_DELAY) == pdTRUE) {
+            local_take_picture_flag = take_picture_flag;
+            take_picture_flag = false;
+            xSemaphoreGive(take_picture_mutex);
+        } else {
+            vTaskDelay(10 / portTICK_PERIOD_MS);  // Avoid busy wait if mutex can't be taken
+            continue;
+        }
+
+        if (local_take_picture_flag) {
             picture_t *picture = capture_image();
             if (picture) {
                 send_image(picture);
@@ -201,7 +295,6 @@ static void command_task(void *pvParameters) {
                 ESP_LOGI(TAG, "Resources freed, preparing to send READY");
                 vTaskDelay(100 / portTICK_PERIOD_MS); // Delay to stabilize
             }
-            command_received = false;
             uart_flush_input(UART_PORT_NUM); // Clear RX buffer
             send_ready_message();
         }
@@ -221,6 +314,13 @@ void app_main(void) {
     uart_init();
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
 
+    // Initialize mutex
+    take_picture_mutex = xSemaphoreCreateMutex();
+    if (take_picture_mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create command mutex");
+        return;
+    }
+
     // Camera warm-up
     sensor_t *s = esp_camera_sensor_get();  // Get sensor handle to optionally tweak auto settings
     if (s != NULL) {
@@ -235,17 +335,17 @@ void app_main(void) {
     }
 
     ESP_LOGI(TAG, "Warming up camera...");
-    for (int i = 0; i < DUMMY_FRAMES; i++) {  // Takes dummy frames to stabilize the camera sensors.
+    for (int i = 0; i < STABILIZE_FRAMES; i++) {  // Takes dummy frames to stabilize the camera sensors.
         camera_fb_t *fb = esp_camera_fb_get();
         if (fb) {
             esp_camera_fb_return(fb);  // Discard the frame
         }
-        vTaskDelay(100 / portTICK_PERIOD_MS);  // 150ms delay per frame for stabilization
+        vTaskDelay(100 / portTICK_PERIOD_MS);  // 100ms delay per frame for stabilization
     }
     ESP_LOGI(TAG, "Camera warmed up");
 
     send_ready_message();
 
     xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 8192, NULL, 2, NULL, 0);
-    xTaskCreatePinnedToCore(command_task, "command_task", 16384, NULL, 1, NULL, 1); // Increased stack for camera
+    xTaskCreatePinnedToCore(picture_task, "picture_task", 16384, NULL, 1, NULL, 1); // Increased stack for camera
 }
