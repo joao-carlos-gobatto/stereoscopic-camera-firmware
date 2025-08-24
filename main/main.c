@@ -20,7 +20,7 @@
 #define RXD_PIN             3           // GPIO3 (RX for USB-serial)
 #define UART_BUFFER_SIZE    (4096)
 #define CHUNK_SIZE          (2048)
-#define STABILIZE_FRAMES        30
+#define STABILIZE_FRAMES    50  // Increased to 50 for better stabilization
 
 static const char *TAG = "uart_test";
 static QueueHandle_t uart_queue;
@@ -31,6 +31,7 @@ static char rx_buffer[128];
 typedef enum {
     CMD_TAKE_PICTURE = 0,
     CMD_SET_FRAMESIZE = 1,
+    CMD_SET_PIXELFORMAT = 2,
     CMD_INVALID = 0xFF
 } command_t;
 
@@ -230,8 +231,10 @@ static void uart_rx_task(void *pvParameters) {
                                                             camera_fb_t *fb = esp_camera_fb_get();
                                                             if (fb) {
                                                                 esp_camera_fb_return(fb);
+                                                            } else {
+                                                                ESP_LOGW(TAG, "Failed to get frame during stabilization %d", i);
                                                             }
-                                                            vTaskDelay(100 / portTICK_PERIOD_MS);
+                                                            vTaskDelay(150 / portTICK_PERIOD_MS); // Increased delay
                                                         }
                                                         ESP_LOGI(TAG, "Stabilization complete");
                                                         send_ok_message();
@@ -244,6 +247,46 @@ static void uart_rx_task(void *pvParameters) {
                                                 }
                                             } else {
                                                 ESP_LOGE(TAG, "Invalid SET_FRAMESIZE command");
+                                                send_error_message();
+                                            }
+                                        }
+                                        break;
+
+                                    case CMD_SET_PIXELFORMAT:
+                                        if (strncmp(rx_buffer, "SET_PIXELFORMAT", 15) == 0) {
+                                            int pixformat_val;
+                                            if (sscanf(rx_buffer, "SET_PIXELFORMAT %d", &pixformat_val) == 1) {
+                                                sensor_t *s = esp_camera_sensor_get();
+                                                if (s != NULL) {
+                                                    // Log current and new pixel format
+                                                    ESP_LOGI(TAG, "Attempting to set pixel format to %d", pixformat_val);
+                                                    int res = s->set_pixformat(s, (pixformat_t)pixformat_val);
+                                                    if (res == 0) {
+                                                        esp_camera_deinit();
+                                                        vTaskDelay(500 / portTICK_PERIOD_MS);
+                                                        ESP_ERROR_CHECK(esp_camera_init(&photo_config));
+                                                        // Stabilize with dummy frames after change
+                                                        ESP_LOGI(TAG, "Stabilizing after pixformat change...");
+                                                        for (int i = 0; i < STABILIZE_FRAMES; i++) {
+                                                            camera_fb_t *fb = esp_camera_fb_get();
+                                                            if (fb) {
+                                                                esp_camera_fb_return(fb);
+                                                            } else {
+                                                                ESP_LOGW(TAG, "Failed to get frame during stabilization %d", i);
+                                                            }
+                                                            vTaskDelay(150 / portTICK_PERIOD_MS);
+                                                        }
+                                                        ESP_LOGI(TAG, "Stabilization complete");
+                                                        send_ok_message();
+                                                    } else {
+                                                        ESP_LOGE(TAG, "Failed to set pixformat: %d", res);
+                                                        send_error_message();
+                                                    }
+                                                } else {
+                                                    send_error_message();
+                                                }
+                                            } else {
+                                                ESP_LOGE(TAG, "Invalid SET_PIXELFORMAT command");
                                                 send_error_message();
                                             }
                                         }
