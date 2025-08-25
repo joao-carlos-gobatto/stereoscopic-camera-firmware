@@ -30,6 +30,7 @@ static char rx_buffer[128];
 
 typedef enum {
     CMD_TAKE_PICTURE = 0,
+    CMD_SET_FRAMESIZE = 1,
     CMD_INVALID = 0xFF
 } command_t;
 
@@ -212,6 +213,41 @@ static void uart_rx_task(void *pvParameters) {
                                         } else {
                                             ESP_LOGE(TAG, "Invalid TAKE_PICTURE format");
                                             send_error_message();
+                                        }
+                                        break;
+
+                                    case CMD_SET_FRAMESIZE:
+                                        if (strncmp(rx_buffer, "SET_FRAMESIZE", 13) == 0) {
+                                            int framesize_val;
+                                            if (sscanf(rx_buffer, "SET_FRAMESIZE %d", &framesize_val) == 1) {
+                                                sensor_t *s = esp_camera_sensor_get();
+                                                if (s != NULL) {
+                                                    int res = s->set_framesize(s, (framesize_t)framesize_val);
+                                                    if (res == 0) {
+                                                        // Stabilize with dummy frames after change
+                                                        ESP_LOGI(TAG, "Stabilizing after framesize change...");
+                                                        for (int i = 0; i < STABILIZE_FRAMES; i++) {
+                                                            camera_fb_t *fb = esp_camera_fb_get();
+                                                            if (fb) {
+                                                                esp_camera_fb_return(fb);
+                                                            } else {
+                                                                ESP_LOGW(TAG, "Failed to get frame during stabilization %d", i);
+                                                            }
+                                                            vTaskDelay(150 / portTICK_PERIOD_MS); // Increased delay
+                                                        }
+                                                        ESP_LOGI(TAG, "Stabilization complete");
+                                                        send_ok_message();
+                                                    } else {
+                                                        ESP_LOGE(TAG, "Failed to set framesize: %d", res);
+                                                        send_error_message();
+                                                    }
+                                                } else {
+                                                    send_error_message();
+                                                }
+                                            } else {
+                                                ESP_LOGE(TAG, "Invalid SET_FRAMESIZE command");
+                                                send_error_message();
+                                            }
                                         }
                                         break;
 
