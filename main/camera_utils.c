@@ -1,4 +1,3 @@
-#include "uart_utils.h"
 #include "camera_utils.h"
 
 SemaphoreHandle_t take_picture_mutex;
@@ -29,7 +28,7 @@ camera_config_t photo_config = {
     .fb_count = 1
 };
 
-static const char *TAG = "camera_utils";
+static const char *TAG = "camera_driver";
 
 picture_t *capture_image(void) {
     camera_fb_t *pic = esp_camera_fb_get();
@@ -61,41 +60,18 @@ picture_t *capture_image(void) {
     return picture;
 }
 
-void send_image(const picture_t *picture) {
-    ESP_LOGI(TAG, "Transmitting image: %u bytes", picture->len);
-    uint32_t image_size = picture->len;
-    int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
-    if (sent != sizeof(image_size)) {
-        ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
-        return;
-    }
-
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < picture->len; i++) {
-        crc = esp_crc32_le(crc, &picture->buf[i], 1);
-    }
-    crc ^= 0xFFFFFFFF;
-    sent = uart_write_bytes(UART_PORT_NUM, (const char*)&crc, sizeof(crc));
-    if (sent != sizeof(crc)) {
-        ESP_LOGE(TAG, "Failed to send CRC: %d bytes sent", sent);
-        return;
-    }
-
-    size_t bytes_sent = 0;
-    while (bytes_sent < picture->len) {
-        size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
-        sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
-        if (sent < 0) {
-            ESP_LOGE(TAG, "UART transmission error at %u bytes", bytes_sent);
-            break;
+void camera_sensors_warmup(void) {
+    ESP_LOGI(TAG, "Warming up camera...");
+    for (int i = 0; i < CONFIG_CAMERA_SENSOR_WARMUP_FRAMES; i++) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) {
+            esp_camera_fb_return(fb);
         }
-        bytes_sent += sent;
-        vTaskDelay(50 / portTICK_PERIOD_MS); // Increased delay for stability
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
-    ESP_LOGI(TAG, "Image transmission complete");
 }
 
-void camera_warm_up(void) {
+void camera_startup(void) {
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
@@ -107,42 +83,18 @@ void camera_warm_up(void) {
         s->set_awb_gain(s, 1);       // Enable AWB gain
         s->set_wb_mode(s, 0);        // Auto WB mode
     }
-
-    ESP_LOGI(TAG, "Warming up camera...");
-    for (int i = 0; i < STABILIZE_FRAMES; i++) {
-        camera_fb_t *fb = esp_camera_fb_get();
-        if (fb) {
-            esp_camera_fb_return(fb);
-        }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
     ESP_LOGI(TAG, "Camera warmed up");
 }
 
-void picture_task(void *pvParameters) {
-    while (1) {
-        bool local_take_picture_flag;
-        if (xSemaphoreTake(take_picture_mutex, portMAX_DELAY) == pdTRUE) {
-            local_take_picture_flag = command_received;
-            command_received = false;
-            xSemaphoreGive(take_picture_mutex);
+void set_camera_framesize(framesize_t size) {
+    sensor_t *s = esp_camera_sensor_get();
+    if (s != NULL) {
+        if (s->set_framesize(s, size) == 0) {
+            ESP_LOGI(TAG, "Camera resolution set to %d", size);
         } else {
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-            continue;
+            ESP_LOGE(TAG, "Failed to set camera resolution");
         }
-
-        if (local_take_picture_flag) {
-            picture_t *picture = capture_image();
-            if (picture) {
-                send_image(picture);
-                free(picture->buf);
-                free(picture);
-                ESP_LOGI(TAG, "Resources freed, preparing to send READY");
-                vTaskDelay(100 / portTICK_PERIOD_MS);
-            }
-            uart_flush_input(UART_PORT_NUM);
-            send_ready_message();
-        }
-        vTaskDelay(10 / portTICK_PERIOD_MS);
+    } else {
+        ESP_LOGE(TAG, "Failed to get camera sensor");
     }
 }

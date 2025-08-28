@@ -7,6 +7,12 @@ menu "Example configuration"
       default "20000000"
       help
           The XCLK Frequency in Herz.
+
+    config CAMERA_SENSOR_WARMUP_FRAMES
+      int "Camera sensor warmup frames"
+      default "30"
+      help
+          Number of frames to be captured and discarded while the camera sensor adjusts its internal parameters (e.g. exposure, white balance, etc.) during initialization.
           
     menu "Pin Configuration"
       config D0

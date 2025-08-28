@@ -5,13 +5,14 @@
 #include <esp_system.h>
 #include <stdio.h>  // For sscanf
 #include <string.h>
+#include <esp_crc.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 #include "driver/uart.h"
 
-#include "esp_camera.h"
+#include "camera_utils.h"
 
 #define UART_PORT_NUM       UART_NUM_0  // Use UART0 for USB-serial
 #define TXD_PIN             1           // GPIO1 (TX for USB-serial)
@@ -29,9 +30,6 @@ typedef enum {
 } command_t;
 
 void uart_init(void);
-void send_ready_message(void);
-void send_ok_message(void);
-void send_error_message(void);
 void uart_rx_task(void *pvParameters);
 
 #endif // UART_UTILS_H

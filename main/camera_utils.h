@@ -3,19 +3,14 @@
 
 #include <esp_log.h>
 #include <esp_system.h>
-#include <esp_crc.h>
 
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"  // For mutex
+#include <string.h>
 
 #include "esp_camera.h"
 
-#define STABILIZE_FRAMES    30
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
-extern SemaphoreHandle_t take_picture_mutex;
-extern volatile bool command_received;
 extern camera_config_t photo_config;
 
 typedef struct {
@@ -23,7 +18,10 @@ typedef struct {
     size_t len;
 } picture_t;
 
-void camera_warm_up(void);
-void picture_task(void *pvParameters);
+void camera_startup(void);
+void camera_sensors_warmup(void);
+void send_image(const picture_t *picture);
+void set_camera_framesize(framesize_t size);
+picture_t *capture_image(void);
 
 #endif // CAMERA_UTILS_H

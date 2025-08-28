@@ -1,20 +1,9 @@
-#include <esp_log.h>
-#include <esp_system.h>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "driver/uart.h"
-
-#include "esp_camera.h"
-
 #include "uart_utils.h"
-#include "camera_utils.h"
 
 QueueHandle_t uart_queue;
-uint8_t rx_buffer[128];
 
-static const char *TAG = "uart_test";
+
+static const char *TAG = "uart_driver";
 
 void uart_init(void) {
     const uart_config_t uart_config = {
@@ -52,77 +41,147 @@ void uart_init(void) {
     ESP_LOGI(TAG, "UART initialized");
 }
 
-void send_ready_message(void) {
-    const uint8_t ready_msg = 0x00; // Binary READY indicator
-    uart_write_bytes(UART_PORT_NUM, (const char*)&ready_msg, 1);
-    ESP_LOGI(TAG, "Sent READY message");
+static void send_ready_message(void) {
+    const char *ready_msg = "READY\r\n";
+    int sent = uart_write_bytes(UART_PORT_NUM, ready_msg, strlen(ready_msg));
+    if (sent < 0) {
+        ESP_LOGE(TAG, "Failed to send READY message");
+    } else {
+        ESP_LOGI(TAG, "Sent READY message");
+    }
 }
 
-void send_ok_message(void) {
-    const uint8_t ok_msg = 0x01; // Binary OK indicator
-    uart_write_bytes(UART_PORT_NUM, (const char*)&ok_msg, 1);
+static void send_ok_message(void) {
+    const char *ok_msg = "OK\r\n";
+    uart_write_bytes(UART_PORT_NUM, ok_msg, strlen(ok_msg));
 }
 
-void send_error_message(void) {
-    const uint8_t error_msg = 0x02; // Binary ERROR indicator
-    uart_write_bytes(UART_PORT_NUM, (const char*)&error_msg, 1);
+static void send_error_message(void) {
+    const char *error_msg = "ERROR\r\n";
+    uart_write_bytes(UART_PORT_NUM, error_msg, strlen(error_msg));
+}
+
+void send_image(const picture_t *picture) {
+    ESP_LOGI(TAG, "Transmitting image: %u bytes", picture->len);
+    uint32_t image_size = picture->len;
+    int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
+    if (sent != sizeof(image_size)) {
+        ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
+        return;
+    }
+
+    uint32_t crc = 0xFFFFFFFF;
+    for (size_t i = 0; i < picture->len; i++) {
+        crc = esp_crc32_le(crc, &picture->buf[i], 1);
+    }
+    crc ^= 0xFFFFFFFF;
+    sent = uart_write_bytes(UART_PORT_NUM, (const char*)&crc, sizeof(crc));
+    if (sent != sizeof(crc)) {
+        ESP_LOGE(TAG, "Failed to send CRC: %d bytes sent", sent);
+        return;
+    }
+
+    size_t bytes_sent = 0;
+    while (bytes_sent < picture->len) {
+        size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
+        sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
+        if (sent < 0) {
+            ESP_LOGE(TAG, "UART transmission error at %u bytes", bytes_sent);
+            break;
+        }
+        bytes_sent += sent;
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Increased delay for stability
+    }
+    ESP_LOGI(TAG, "Image transmission complete");
 }
 
 void uart_rx_task(void *pvParameters) {
     uart_event_t event;
-    uint8_t expected_len = 0;
+    char rx_buffer[128];
+
+    camera_startup();
+
+    camera_sensors_warmup();
+
+    send_ready_message();
 
     while (1) {
         if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
-            if (event.type == UART_DATA) {
-                int len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);
-                if (len > 0) {
-                    ESP_LOGI(TAG, "Received %d bytes", len);
-                    if (len >= 2) { // Ensure we have command byte and length
-                        uint8_t cmd = rx_buffer[0];
-                        expected_len = rx_buffer[1];
-                        if (len >= 2 + expected_len) { // Full packet received
-                            if (cmd == CMD_TAKE_PICTURE && expected_len == 0) {
-                                command_received = true;
-                            } else if (cmd == CMD_SET_FRAMESIZE && expected_len == 1) {
-                                uint8_t framesize_val = rx_buffer[2];
-                                if (framesize_val <= 15) { // Valid range for framesizes
-                                    sensor_t *s = esp_camera_sensor_get();
-                                    if (s != NULL) {
-                                        int res = s->set_framesize(s, (framesize_t)framesize_val);
-                                        if (res == 0) {
-                                            ESP_LOGI(TAG, "Stabilizing after framesize change...");
-                                            for (int i = 0; i < STABILIZE_FRAMES; i++) {
-                                                camera_fb_t *fb = esp_camera_fb_get();
-                                                if (fb) {
-                                                    esp_camera_fb_return(fb);
-                                                }
+            switch (event.type) {
+                case UART_DATA:
+                    {
+                        uint8_t cmd_byte;
+                        int len = uart_read_bytes(UART_PORT_NUM, &cmd_byte, 1, 0);  // Read command byte
+                        if (len == 1) {
+                            len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);  // Read command string
+                            if (len > 0) {
+                                rx_buffer[len] = 0;
+                                ESP_LOGI(TAG, "Received command byte: %d, data: %s", cmd_byte, rx_buffer);
+
+                                // Determine command based on byte
+                                command_t cmd = (command_t)cmd_byte;
+                                switch (cmd) {
+                                    case CMD_TAKE_PICTURE:
+                                        if (strstr(rx_buffer, "TAKE_PICTURE") != NULL) {
+                                            picture_t *picture = capture_image();
+                                            if (picture) {
+                                                send_image(picture);
+                                                free(picture->buf);
+                                                free(picture);
+                                                ESP_LOGI(TAG, "Resources freed, preparing to send READY");
                                                 vTaskDelay(100 / portTICK_PERIOD_MS);
                                             }
-                                            ESP_LOGI(TAG, "Stabilization complete");
-                                            send_ok_message();
+                                            uart_flush_input(UART_PORT_NUM);
+                                            send_ready_message();
                                         } else {
-                                            ESP_LOGE(TAG, "Failed to set framesize: %d", res);
+                                            ESP_LOGE(TAG, "Invalid TAKE_PICTURE format");
                                             send_error_message();
                                         }
-                                    } else {
+                                        break;
+
+                                    case CMD_SET_FRAMESIZE:
+                                        if (strstr(rx_buffer, "SET_FRAMESIZE") != NULL) {
+                                            char *token = strtok(rx_buffer, " ");
+                                            token = strtok(NULL, " ");
+                                            if (token) {
+                                                int size = atoi(token);
+                                                if (size >= FRAMESIZE_96X96 && size <= FRAMESIZE_UXGA) {
+                                                    set_camera_framesize((framesize_t)size);
+                                                    send_ok_message();
+                                                } else {
+                                                    ESP_LOGE(TAG, "Invalid framesize value: %d", size);
+                                                    send_error_message();
+                                                }
+                                            } else {
+                                                ESP_LOGE(TAG, "No framesize value provided");
+                                                send_error_message();
+                                            }
+                                        } else {
+                                            ESP_LOGE(TAG, "Invalid SET_FRAMESIZE format");
+                                            send_error_message();
+                                        }
+                                        break;
+
+                                    default:
+                                        ESP_LOGW(TAG, "Unknown command byte: %d", cmd_byte);
                                         send_error_message();
-                                    }
-                                } else {
-                                    ESP_LOGE(TAG, "Invalid framesize value: %d", framesize_val);
-                                    send_error_message();
+                                        break;
                                 }
-                            } else {
-                                ESP_LOGE(TAG, "Invalid command or length: cmd=%d, len=%d", cmd, expected_len);
-                                send_error_message();
                             }
                         }
                     }
-                }
-            } else if (event.type == UART_FIFO_OVF || event.type == UART_BUFFER_FULL) {
-                ESP_LOGW(TAG, "UART buffer overflow, flushing");
-                uart_flush_input(UART_PORT_NUM);
-                xQueueReset(uart_queue);
+                    break;
+
+                case UART_FIFO_OVF:
+                case UART_BUFFER_FULL:
+                    ESP_LOGW(TAG, "UART buffer overflow, flushing");
+                    uart_flush_input(UART_PORT_NUM);
+                    xQueueReset(uart_queue);
+                    break;
+
+                default:
+                    ESP_LOGW(TAG, "Unknown UART event");
+                    break;
             }
         }
     }
