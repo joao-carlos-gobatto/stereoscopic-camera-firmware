@@ -144,12 +144,13 @@ void uart_rx_task(void *pvParameters) {
                                             char *token = strtok(rx_buffer, " ");
                                             token = strtok(NULL, " ");
                                             if (token) {
-                                                int size = atoi(token);
-                                                if (size >= FRAMESIZE_96X96 && size <= FRAMESIZE_UXGA) {
-                                                    set_camera_framesize((framesize_t)size);
+                                                int framesize = atoi(token);
+                                                if (framesize >= FRAMESIZE_96X96 && framesize <= FRAMESIZE_UXGA) {
+                                                    set_camera_framesize((framesize_t)framesize);
+                                                    camera_sensors_warmup();
                                                     send_ok_message();
                                                 } else {
-                                                    ESP_LOGE(TAG, "Invalid framesize value: %d", size);
+                                                    ESP_LOGE(TAG, "Invalid framesize value: %d", framesize);
                                                     send_error_message();
                                                 }
                                             } else {
