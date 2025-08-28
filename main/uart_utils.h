@@ -20,6 +20,14 @@
 #define UART_BUFFER_SIZE    (4096)
 #define CHUNK_SIZE          (2048)
 
+// UART Messaging Protocol Message Types
+#define RIGHT "RIGHT\r\n"
+#define LEFT "LEFT\r\n"
+#define IMAGE_START "IMAGE_START\r\n"
+#define READY "READY\r\n"
+#define OK "OK\r\n"
+#define ERROR "ERROR\r\n"
+
 extern QueueHandle_t uart_queue;
 extern uint8_t rx_buffer[128];
 
@@ -29,7 +37,7 @@ typedef enum {
     CMD_INVALID = 0xFF
 } command_t;
 
-void uart_init(void);
+esp_err_t uart_init(void);
 void uart_rx_task(void *pvParameters);
 
 #endif // UART_UTILS_H

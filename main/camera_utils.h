@@ -8,20 +8,19 @@
 #include <string.h>
 
 #include "esp_camera.h"
+#include "esp_psram.h"
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
-
-extern camera_config_t photo_config;
 
 typedef struct {
     uint8_t *buf;
     size_t len;
 } picture_t;
 
-void camera_startup(void);
-void camera_sensors_warmup(void);
-void send_image(const picture_t *picture);
-void set_camera_framesize(framesize_t size);
+esp_err_t camera_startup(void);
+esp_err_t camera_sensors_warmup(void);
+esp_err_t set_camera_framesize(framesize_t size);
 picture_t *capture_image(void);
+void send_image(const picture_t *picture);
 
 #endif // CAMERA_UTILS_H

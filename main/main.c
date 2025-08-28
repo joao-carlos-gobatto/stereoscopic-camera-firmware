@@ -1,9 +1,12 @@
 #include <esp_log.h>
 #include <esp_system.h>
 #include <nvs_flash.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+
 #include "uart_utils.h"
+#include "camera_utils.h"
 
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
@@ -13,7 +16,9 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    uart_init();
+    ESP_ERROR_CHECK(uart_init());
+
+    camera_startup();
 
     xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 8192, NULL, 2, NULL, 0);
 }
