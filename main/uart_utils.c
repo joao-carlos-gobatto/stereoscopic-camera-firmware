@@ -52,7 +52,7 @@ static esp_err_t send_uart_message(const char *msg) {
 
 void send_image(const picture_t *picture) {
     uint32_t image_size = picture->len;
-    send_uart_message(IMAGE_START);
+    send_uart_message(IMAGE_START_STRING);
     int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
     if (sent != sizeof(image_size)) {
         ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
@@ -75,85 +75,79 @@ void send_image(const picture_t *picture) {
         size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
         sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
         if (sent < 0) {
-            ESP_LOGE(TAG, "UART transmission error at %u bytes", bytes_sent);
+            ESP_LOGE(TAG, "UART transmission ERROR_STRING at %u bytes", bytes_sent);
             break;
         }
         bytes_sent += sent;
-        vTaskDelay(50 / portTICK_PERIOD_MS); // Increased delay for stability
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Delay for stability
     }
-    ESP_ERROR_CHECK(send_uart_message(READY));
+    ESP_ERROR_CHECK(send_uart_message(READY_STRING));
 }
 
 void uart_rx_task(void *pvParameters) {
     uart_event_t event;
-    char rx_buffer[128];
 
-    ESP_ERROR_CHECK(send_uart_message(READY));
+    ESP_ERROR_CHECK(send_uart_message(READY_STRING));
 
     while (1) {
         if (xQueueReceive(uart_queue, &event, portMAX_DELAY)) {
             switch (event.type) {
                 case UART_DATA:
                     {
-                        uint8_t cmd_byte;
+                        char cmd_byte = 0, payload_byte = 0;
                         int len = uart_read_bytes(UART_PORT_NUM, &cmd_byte, 1, 0);  // Read command byte
                         if (len == 1) {
-                            len = uart_read_bytes(UART_PORT_NUM, rx_buffer, sizeof(rx_buffer) - 1, 0);  // Read command string
-                            if (len > 0) {
-                                rx_buffer[len] = 0;
-                                ESP_LOGI(TAG, "Received command byte: %d, data: %s", cmd_byte, rx_buffer);
+                            command_t cmd = (command_t)cmd_byte;
+                            switch (cmd) {
+                                case CMD_TAKE_PICTURE:
+                                    picture_t *picture = capture_image();
+                                    if (picture) {
+                                        send_image(picture);
+                                        free(picture->buf);
+                                        free(picture);
+                                        ESP_LOGI(TAG, "Resources freed, preparing to send READY_STRING");
+                                        vTaskDelay(100 / portTICK_PERIOD_MS);
+                                    }
+                                    ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
+                                    ESP_ERROR_CHECK(send_uart_message(OK_STRING));
+                                    break;
 
-                                // Determine command based on byte
-                                command_t cmd = (command_t)cmd_byte;
-                                switch (cmd) {
-                                    case CMD_TAKE_PICTURE:
-                                        if (strstr(rx_buffer, "TAKE_PICTURE") != NULL) {
-                                            picture_t *picture = capture_image();
-                                            if (picture) {
-                                                send_image(picture);
-                                                free(picture->buf);
-                                                free(picture);
-                                                ESP_LOGI(TAG, "Resources freed, preparing to send READY");
-                                                vTaskDelay(100 / portTICK_PERIOD_MS);
-                                            }
-                                            ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
-                                            ESP_ERROR_CHECK(send_uart_message(READY));
+                                case CMD_SET_FRAMESIZE:
+                                    int len = uart_read_bytes(UART_PORT_NUM, &payload_byte, 1, 0);  // Read payload byte
+                                    if (len == 1) {
+                                        if (payload_byte >= FRAMESIZE_96X96 && payload_byte <= FRAMESIZE_UXGA) {
+                                            ESP_ERROR_CHECK(set_camera_framesize((framesize_t)payload_byte));
+                                            ESP_ERROR_CHECK(camera_sensors_warmup());
+                                            ESP_ERROR_CHECK(send_uart_message(OK_STRING));
                                         } else {
-                                            ESP_LOGE(TAG, "Invalid TAKE_PICTURE format");
-                                            ESP_ERROR_CHECK(send_uart_message(ERROR));
+                                            ESP_LOGE(TAG, "Invalid framesize value: %d", payload_byte);
+                                            ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                         }
+                                    } else {
+                                        ESP_LOGE(TAG, "Failed to read framesize payload");
+                                        ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                         break;
+                                    }
+                                    break;
 
-                                    case CMD_SET_FRAMESIZE:
-                                        if (strstr(rx_buffer, "SET_FRAMESIZE") != NULL) {
-                                            char *token = strtok(rx_buffer, " ");
-                                            token = strtok(NULL, " ");
-                                            if (token) {
-                                                int framesize = atoi(token);
-                                                if (framesize >= FRAMESIZE_96X96 && framesize <= FRAMESIZE_UXGA) {
-                                                    ESP_ERROR_CHECK(set_camera_framesize((framesize_t)framesize));
-                                                    ESP_ERROR_CHECK(camera_sensors_warmup());
-                                                    ESP_ERROR_CHECK(send_uart_message(OK));
-                                                } else {
-                                                    ESP_LOGE(TAG, "Invalid framesize value: %d", framesize);
-                                                    ESP_ERROR_CHECK(send_uart_message(ERROR));
-                                                }
-                                            } else {
-                                                ESP_LOGE(TAG, "No framesize value provided");
-                                                ESP_ERROR_CHECK(send_uart_message(ERROR));
-                                            }
-                                        } else {
-                                            ESP_LOGE(TAG, "Invalid SET_FRAMESIZE format");
-                                            ESP_ERROR_CHECK(send_uart_message(ERROR));
-                                        }
-                                        break;
+                                case CMD_CAMERA_SIDE:
+                                    if (CONFIG_CAMERA_SIDE == RIGHT)
+                                    {
+                                        ESP_ERROR_CHECK(send_uart_message(RIGHT_STRING));
+                                    } else if (CONFIG_CAMERA_SIDE == LEFT)
+                                    {
+                                        ESP_ERROR_CHECK(send_uart_message(LEFT_STRING));
+                                    }
+                                    break;
 
-                                    default:
-                                        ESP_LOGW(TAG, "Unknown command byte: %d", cmd_byte);
-                                        ESP_ERROR_CHECK(send_uart_message(ERROR));
-                                        break;
-                                }
+                                default:
+                                    ESP_LOGW(TAG, "Unknown command byte: %d", cmd_byte);
+                                    ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                    break;
                             }
+                        } else {
+                            ESP_LOGE(TAG, "Failed to read command byte");
+                            ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                         }
                     }
                     break;

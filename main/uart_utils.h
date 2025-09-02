@@ -21,12 +21,12 @@
 #define CHUNK_SIZE          (2048)
 
 // UART Messaging Protocol Message Types
-#define RIGHT "RIGHT\r\n"
-#define LEFT "LEFT\r\n"
-#define IMAGE_START "IMAGE_START\r\n"
-#define READY "READY\r\n"
-#define OK "OK\r\n"
-#define ERROR "ERROR\r\n"
+#define RIGHT_STRING "RIGHT\r\n"
+#define LEFT_STRING "LEFT\r\n"
+#define IMAGE_START_STRING "IMAGE_START\r\n"
+#define READY_STRING "READY\r\n"
+#define OK_STRING "OK\r\n"
+#define ERROR_STRING "ERROR\r\n"
 
 extern QueueHandle_t uart_queue;
 extern uint8_t rx_buffer[128];
@@ -34,8 +34,14 @@ extern uint8_t rx_buffer[128];
 typedef enum {
     CMD_TAKE_PICTURE = 0,
     CMD_SET_FRAMESIZE = 1,
+    CMD_CAMERA_SIDE = 2,
     CMD_INVALID = 0xFF
 } command_t;
+
+typedef enum {
+    RIGHT = 0,
+    LEFT = 1
+} camera_side_t;
 
 esp_err_t uart_init(void);
 void uart_rx_task(void *pvParameters);
