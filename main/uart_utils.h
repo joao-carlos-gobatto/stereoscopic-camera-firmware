@@ -33,14 +33,14 @@ extern uint8_t rx_buffer[128];
 
 typedef enum {
     CMD_TAKE_PICTURE = 0,
-    CMD_SET_FRAMESIZE = 1,
-    CMD_CAMERA_SIDE = 2,
+    CMD_SET_FRAMESIZE,
+    CMD_CAMERA_SIDE,
     CMD_INVALID = 0xFF
 } command_t;
 
 typedef enum {
-    RIGHT = 0,
-    LEFT = 1
+    RIGHT,
+    LEFT
 } camera_side_t;
 
 esp_err_t uart_init(void);

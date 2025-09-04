@@ -86,6 +86,8 @@ void send_image(const picture_t *picture) {
 
 void uart_rx_task(void *pvParameters) {
     uart_event_t event;
+    command_t cmd_value = CMD_INVALID;
+    framesize_t framesize_value = FRAMESIZE_UXGA; // Default to max resolution
 
     ESP_ERROR_CHECK(send_uart_message(READY_STRING));
 
@@ -94,10 +96,11 @@ void uart_rx_task(void *pvParameters) {
             switch (event.type) {
                 case UART_DATA:
                     {
-                        char cmd_byte = 0, payload_byte = 0;
-                        int len = uart_read_bytes(UART_PORT_NUM, &cmd_byte, 1, 0);  // Read command byte
+                        cmd_value = CMD_INVALID;
+                        framesize_value = FRAMESIZE_UXGA;
+                        int len = uart_read_bytes(UART_PORT_NUM, &cmd_value, 1, 0);  // Read command value
                         if (len == 1) {
-                            command_t cmd = (command_t)cmd_byte;
+                            command_t cmd = (command_t)cmd_value;
                             switch (cmd) {
                                 case CMD_TAKE_PICTURE:
                                     picture_t *picture = capture_image();
@@ -113,18 +116,18 @@ void uart_rx_task(void *pvParameters) {
                                     break;
 
                                 case CMD_SET_FRAMESIZE:
-                                    int len = uart_read_bytes(UART_PORT_NUM, &payload_byte, 1, 0);  // Read payload byte
+                                    int len = uart_read_bytes(UART_PORT_NUM, &framesize_value, 1, 0);  // Read framesize value
                                     if (len == 1) {
-                                        if (payload_byte >= FRAMESIZE_96X96 && payload_byte <= FRAMESIZE_UXGA) {
-                                            ESP_ERROR_CHECK(set_camera_framesize((framesize_t)payload_byte));
+                                        if (framesize_value >= FRAMESIZE_96X96 && framesize_value <= FRAMESIZE_UXGA) {
+                                            ESP_ERROR_CHECK(set_camera_framesize(framesize_value));
                                             ESP_ERROR_CHECK(camera_sensors_warmup());
                                             ESP_ERROR_CHECK(send_uart_message(OK_STRING));
                                         } else {
-                                            ESP_LOGE(TAG, "Invalid framesize value: %d", payload_byte);
+                                            ESP_LOGE(TAG, "Invalid framesize value: %d", framesize_value);
                                             ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                         }
                                     } else {
-                                        ESP_LOGE(TAG, "Failed to read framesize payload");
+                                        ESP_LOGE(TAG, "Failed to read framesize value");
                                         ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                         break;
                                     }
@@ -141,7 +144,7 @@ void uart_rx_task(void *pvParameters) {
                                     break;
 
                                 default:
-                                    ESP_LOGW(TAG, "Unknown command byte: %d", cmd_byte);
+                                    ESP_LOGW(TAG, "Unknown command byte: %d", cmd_value);
                                     ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                     break;
                             }
