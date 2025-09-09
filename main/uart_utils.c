@@ -45,13 +45,13 @@ static esp_err_t send_uart_message(const char *msg) {
     int sent = uart_write_bytes(UART_PORT_NUM, msg, strlen(msg));
     if (sent < 0) {
         return ESP_FAIL;
-    } else {
-        return ESP_OK;
     }
+    uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(100));
+    return ESP_OK;
 }
 
 static esp_err_t send_image_size(uint32_t image_size) {
-    int sent = uart_write_bytes(UART_PORT_NUM, &image_size, sizeof(image_size));
+    int sent = uart_write_bytes(UART_PORT_NUM, &image_size, sizeof(uint32_t));
     if (sent != sizeof(image_size)) {
         return ESP_FAIL;
     }
@@ -60,7 +60,7 @@ static esp_err_t send_image_size(uint32_t image_size) {
 }
 
 static esp_err_t send_image_crc(uint32_t crc) {
-    int sent = uart_write_bytes(UART_PORT_NUM, &crc, sizeof(crc));
+    int sent = uart_write_bytes(UART_PORT_NUM, &crc, sizeof(uint32_t));
     if (sent != sizeof(crc)) {
         return ESP_FAIL;
     }
@@ -77,7 +77,7 @@ static esp_err_t send_image_data(const picture_t *picture) {
             return ESP_FAIL;
         }
         bytes_sent += sent;
-        uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(50));
+        uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(100));
     }
     return ESP_OK;
 }
@@ -127,6 +127,7 @@ void uart_rx_task(void *pvParameters) {
                                     {
                                         ESP_ERROR_CHECK(send_uart_message(LEFT_STRING));
                                     }
+                                    ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
                                     break;
 
                                 case CMD_TAKE_PICTURE:
