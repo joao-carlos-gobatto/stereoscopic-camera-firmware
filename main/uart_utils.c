@@ -50,44 +50,43 @@ static esp_err_t send_uart_message(const char *msg) {
     }
 }
 
-void send_image(const picture_t *picture) {
-    uint32_t image_size = picture->len;
-    send_uart_message(IMAGE_START_STRING);
-    int sent = uart_write_bytes(UART_PORT_NUM, (const char*)&image_size, sizeof(image_size));
+static esp_err_t send_image_size(uint32_t image_size) {
+    int sent = uart_write_bytes(UART_PORT_NUM, &image_size, sizeof(image_size));
     if (sent != sizeof(image_size)) {
-        ESP_LOGE(TAG, "Failed to send image size: %d bytes sent", sent);
-        return;
+        return ESP_FAIL;
     }
+    uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
 
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < picture->len; i++) {
-        crc = esp_crc32_le(crc, &picture->buf[i], 1);
-    }
-    crc ^= 0xFFFFFFFF;
-    sent = uart_write_bytes(UART_PORT_NUM, (const char*)&crc, sizeof(crc));
+static esp_err_t send_image_crc(uint32_t crc) {
+    int sent = uart_write_bytes(UART_PORT_NUM, &crc, sizeof(crc));
     if (sent != sizeof(crc)) {
-        ESP_LOGE(TAG, "Failed to send CRC: %d bytes sent", sent);
-        return;
+        return ESP_FAIL;
     }
+    uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(100));
+    return ESP_OK;
+}
 
+static esp_err_t send_image_data(const picture_t *picture) {
     size_t bytes_sent = 0;
     while (bytes_sent < picture->len) {
         size_t chunk_size = MIN(CHUNK_SIZE, picture->len - bytes_sent);
-        sent = uart_write_bytes(UART_PORT_NUM, (const char*)(picture->buf + bytes_sent), chunk_size);
+        int sent = uart_write_bytes(UART_PORT_NUM, (picture->buf + bytes_sent), chunk_size);
         if (sent < 0) {
-            ESP_LOGE(TAG, "UART transmission ERROR_STRING at %u bytes", bytes_sent);
-            break;
+            return ESP_FAIL;
         }
         bytes_sent += sent;
-        vTaskDelay(50 / portTICK_PERIOD_MS); // Delay for stability
+        uart_wait_tx_done(UART_PORT_NUM, pdMS_TO_TICKS(50));
     }
-    ESP_ERROR_CHECK(send_uart_message(READY_STRING));
+    return ESP_OK;
 }
 
 void uart_rx_task(void *pvParameters) {
     uart_event_t event;
-    command_t cmd_value = CMD_INVALID;
+    uint8_t cmd_value = CMD_INVALID;
     framesize_t framesize_value = FRAMESIZE_UXGA; // Default to max resolution
+    picture_t *picture = NULL;
 
     ESP_ERROR_CHECK(send_uart_message(READY_STRING));
 
@@ -100,21 +99,8 @@ void uart_rx_task(void *pvParameters) {
                         framesize_value = FRAMESIZE_UXGA;
                         int len = uart_read_bytes(UART_PORT_NUM, &cmd_value, 1, 0);  // Read command value
                         if (len == 1) {
-                            command_t cmd = (command_t)cmd_value;
+                            command_t cmd = cmd_value;
                             switch (cmd) {
-                                case CMD_TAKE_PICTURE:
-                                    picture_t *picture = capture_image();
-                                    if (picture) {
-                                        send_image(picture);
-                                        free(picture->buf);
-                                        free(picture);
-                                        ESP_LOGI(TAG, "Resources freed, preparing to send READY_STRING");
-                                        vTaskDelay(100 / portTICK_PERIOD_MS);
-                                    }
-                                    ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
-                                    ESP_ERROR_CHECK(send_uart_message(OK_STRING));
-                                    break;
-
                                 case CMD_SET_FRAMESIZE:
                                     int len = uart_read_bytes(UART_PORT_NUM, &framesize_value, 1, 0);  // Read framesize value
                                     if (len == 1) {
@@ -140,6 +126,51 @@ void uart_rx_task(void *pvParameters) {
                                     } else if (CONFIG_CAMERA_SIDE == LEFT)
                                     {
                                         ESP_ERROR_CHECK(send_uart_message(LEFT_STRING));
+                                    }
+                                    break;
+
+                                case CMD_TAKE_PICTURE:
+                                picture = capture_image();
+                                if (picture) {
+                                    ESP_ERROR_CHECK(send_uart_message(OK_STRING));
+                                    ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
+                                } else {
+                                    ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                }
+                                break;
+
+                                case CMD_PICTURE_SIZE:
+                                    if (picture) {
+                                        if (send_image_size(picture->len) == ESP_OK) {
+                                            ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
+                                        } else {
+                                            ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                        }
+                                    } else {
+                                        ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                    }
+                                    break;
+                                case CMD_PICTURE_CRC:
+                                    if (picture) {
+                                        uint32_t crc = esp_crc32_le(0, picture->buf, picture->len); // Init=0
+                                        if (send_image_crc(crc) == ESP_OK) {
+                                            ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
+                                        } else {
+                                            ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                        }
+                                    } else {
+                                        ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                    }
+                                    break;
+                                case CMD_PICTURE_DATA:
+                                    if (picture) {
+                                        if (send_image_data(picture) == ESP_OK) {
+                                            ESP_ERROR_CHECK(uart_flush_input(UART_PORT_NUM));
+                                        } else {
+                                            ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
+                                        }
+                                    } else {
+                                        ESP_ERROR_CHECK(send_uart_message(ERROR_STRING));
                                     }
                                     break;
 

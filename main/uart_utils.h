@@ -35,6 +35,9 @@ typedef enum {
     CMD_TAKE_PICTURE = 0,
     CMD_SET_FRAMESIZE,
     CMD_CAMERA_SIDE,
+    CMD_PICTURE_SIZE,
+    CMD_PICTURE_CRC,
+    CMD_PICTURE_DATA,
     CMD_INVALID = 0xFF
 } command_t;
 
