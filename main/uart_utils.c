@@ -85,7 +85,7 @@ static esp_err_t send_image_data(const picture_t *picture) {
 void uart_rx_task(void *pvParameters) {
     uart_event_t event;
     uint8_t cmd_value = CMD_INVALID;
-    framesize_t framesize_value = FRAMESIZE_UXGA; // Default to max resolution
+    framesize_t framesize_value = FRAMESIZE_QVGA; // Default to max resolution
     picture_t *picture = NULL;
 
     ESP_ERROR_CHECK(send_uart_message(READY_STRING));
@@ -96,7 +96,7 @@ void uart_rx_task(void *pvParameters) {
                 case UART_DATA:
                     {
                         cmd_value = CMD_INVALID;
-                        framesize_value = FRAMESIZE_UXGA;
+                        framesize_value = FRAMESIZE_QVGA;
                         int len = uart_read_bytes(UART_PORT_NUM, &cmd_value, 1, 0);  // Read command value
                         if (len == 1) {
                             command_t cmd = cmd_value;
