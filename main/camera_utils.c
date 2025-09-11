@@ -58,7 +58,6 @@ picture_t *capture_image(void) {
     picture->buf = buf;
     picture->len = pic->len;
     esp_camera_fb_return(pic);
-    ESP_LOGI(TAG, "Captured image: %u bytes", pic->len);
     return picture;
 }
 
