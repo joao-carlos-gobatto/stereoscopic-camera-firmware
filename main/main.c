@@ -5,8 +5,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "uart_utils.h"
 #include "camera_utils.h"
+#include "wifi_utils.h"
 
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
@@ -16,9 +16,15 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(uart_init());
+    //Starts up wifi
+    wifi_init_sta();
 
-    camera_startup();
+    //Connects to a server
+    
 
-    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 8192, NULL, 2, NULL, 0);
+    //Sends if it's right or left camera
+
+    //Starts up camera
+
+    //Starts http camera feed stream
 }

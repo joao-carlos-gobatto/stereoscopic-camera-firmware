@@ -21,6 +21,5 @@ esp_err_t camera_startup(void);
 esp_err_t camera_sensors_warmup(void);
 esp_err_t set_camera_framesize(framesize_t size);
 picture_t *capture_image(void);
-void send_image(const picture_t *picture);
 
 #endif // CAMERA_UTILS_H
