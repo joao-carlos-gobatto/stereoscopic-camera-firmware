@@ -13,3 +13,6 @@ sudo systemctl stop brltty.service
 sudo systemctl disable brltty.service
 If the esp is not being identified because of the brltty service, this will make the esp be detected
 by your system.
+
+Please refer to: https://docs.espressif.com/projects/esp-faq/en/latest/application-solution/camera-application.html
+If cam-hal messages are showing up.

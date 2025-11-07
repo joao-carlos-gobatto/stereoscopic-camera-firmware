@@ -1,12 +1,23 @@
-menu "Example configuration"
+menu "Project Specific Configuration"
 
   menu "Camera configuration"
+    config CAMERA_SIDE
+      int "Camera Side"
+      default "0"
+      help
+        Select the side where the camera is in the hardware (0 = right or left = 1).
 
     config XCLK_FREQ
       int "XCLK Frequency"
       default "20000000"
       help
           The XCLK Frequency in Herz.
+
+    config CAMERA_SENSOR_WARMUP_FRAMES
+      int "Camera sensor warmup frames"
+      default "30"
+      help
+          Number of frames to be captured and discarded while the camera sensor adjusts its internal parameters (e.g. exposure, white balance, etc.) during initialization.
           
     menu "Pin Configuration"
       config D0
@@ -110,7 +121,7 @@ menu "Example configuration"
       int "Picture queue size" 
       default 10
       help
-            Every time a new QXVGA picture is taken, send to the queue. This configuration represents the maximum size allowed to the queue.
+            Every time a new picture is taken, send to the queue. This configuration represents the maximum size allowed to the queue.
 
   endmenu
 
