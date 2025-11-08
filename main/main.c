@@ -7,6 +7,7 @@
 
 #include "camera_utils.h"
 #include "wifi_utils.h"
+#include "udp_socket_utils.h"
 
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
@@ -19,12 +20,9 @@ void app_main(void) {
     //Starts up wifi
     wifi_init_sta();
 
-    //Connects to a server
-    
-
-    //Sends if it's right or left camera
-
     //Starts up camera
+    ESP_ERROR_CHECK(camera_startup());
 
-    //Starts http camera feed stream
+    //Starts udp socket task
+    xTaskCreate(udp_discovery_task, "udp_discovery_task", 4096, NULL, 5, NULL);
 }

@@ -30,65 +30,13 @@ camera_config_t photo_config = {
 
 static const char *TAG = "camera_driver";
 
-picture_t *capture_image(void) {
-    // Returns a frame_buffer to the backend driver
-    esp_camera_fb_return(esp_camera_fb_get());
-    camera_fb_t *pic = esp_camera_fb_get();
-    if (!pic) {
-        ESP_LOGE(TAG, "Failed to capture image");
-        return NULL;
-    }
-
-    picture_t *picture = malloc(sizeof(picture_t));
-    if (picture == NULL) {
-        ESP_LOGE(TAG, "Error allocating picture struct");
-        esp_camera_fb_return(pic);
-        return NULL;
-    }
-
-    uint8_t *buf = malloc(pic->len);
-    if (buf == NULL) {
-        ESP_LOGE(TAG, "Error allocating picture buffer");
-        free(picture);
-        esp_camera_fb_return(pic);
-        return NULL;
-    }
-
-    memcpy(buf, pic->buf, pic->len);
-    picture->buf = buf;
-    picture->len = pic->len;
-    esp_camera_fb_return(pic);
-    return picture;
-}
-
-esp_err_t camera_sensors_warmup(void) {
-    ESP_LOGI(TAG, "Warming up camera...");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    int fail_count = 0;
-    for (int i = 0; i < CONFIG_CAMERA_SENSOR_WARMUP_FRAMES; i++) {
-        picture_t *pic = capture_image();
-        if (pic) {
-            free(pic->buf);
-            free(pic);
-        } else {    
-            ESP_LOGE(TAG, "Warmup frame %d failed", i);
-            if (++fail_count > CONFIG_CAMERA_SENSOR_WARMUP_FRAMES / 2) {
-                ESP_LOGE(TAG, "Too many warmup failures, aborting");
-                return ESP_FAIL;
-            }
-        }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    return ESP_OK;
-}
-
 esp_err_t camera_startup(void) {
     if (esp_psram_is_initialized()) {
         photo_config.fb_count = 2; //Improve frame rate with PSRAM
     } else {
         photo_config.fb_count = 1;
-        photo_config.frame_size = FRAMESIZE_SVGA; // Fallback if no PSRAM
     }
+    photo_config.frame_size = FRAMESIZE_QVGA;
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
@@ -104,8 +52,6 @@ esp_err_t camera_startup(void) {
         ESP_LOGE(TAG, "Failed to get camera sensor");
         return ESP_FAIL;
     }
-    camera_sensors_warmup();
-    ESP_LOGI(TAG, "Camera warmed up");
     return ESP_OK;
 }
 

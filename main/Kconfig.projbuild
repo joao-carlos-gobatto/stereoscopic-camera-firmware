@@ -194,3 +194,25 @@ menu "Wifi Configuration"
     endchoice
 
 endmenu
+
+menu "UDP Socket Configuration"
+
+  config UDP_STREAM_PORT
+      int "Stream Port"
+      range 0 65535
+      default 3333
+      help
+          The remote port to which the client example will send data.
+
+endmenu
+
+menu "TCP Socket Configuration"
+
+  config TCP_CONTROL_PORT
+      int "Control Port"
+      range 0 65535
+      default 3334
+      help
+          The remote port to which the client example will send data.
+
+endmenu
