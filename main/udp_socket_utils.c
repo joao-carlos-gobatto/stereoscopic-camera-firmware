@@ -16,14 +16,16 @@ static void udp_stream_task(void *pvParameters)
         return;
     }
 
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+    int send_buf_size = 16 * 1024;  // Aumenta buffer de envio
+    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &send_buf_size, sizeof(send_buf_size));
 
     uint32_t frame_counter = 0;
+    int packet_delay_ms = 2;     // delay inicial
+    int stable_frames = 0;       // contador para reduzir delay
 
     ESP_LOGI(TAG, "Iniciando streaming para %s:%d",
              inet_ntoa(server_addr.sin_addr), ntohs(server_addr.sin_port));
-
+    
     while (1) {
         int64_t frame_start = esp_timer_get_time();
         camera_fb_t *fb = esp_camera_fb_get();
@@ -33,11 +35,11 @@ static void udp_stream_task(void *pvParameters)
             continue;
         }
 
-        // Calcula número total de pacotes
         uint16_t total_packets = fb->len / PACKET_SIZE;
         if (fb->len % PACKET_SIZE) total_packets++;
 
-        // Envia em fragmentos com cabeçalho
+        bool frame_ok = true;
+
         for (uint16_t i = 0; i < total_packets; i++) {
             size_t chunk_size = (i < total_packets - 1) ? PACKET_SIZE : (fb->len - (i * PACKET_SIZE));
 
@@ -52,25 +54,47 @@ static void udp_stream_task(void *pvParameters)
 
             int err = sendto(sock, buffer, sizeof(hdr) + chunk_size, 0,
                              (struct sockaddr *)&server_addr, sizeof(server_addr));
-            if (err < 0 && errno != EAGAIN) {
-                ESP_LOGW(TAG, "Erro no envio (frame %lu pkt %u): %d", frame_counter, i, errno);
+
+            
+        if (err < 0) {
+            if (errno == ENOMEM) {
+                frame_ok = false;
+                packet_delay_ms = MIN(packet_delay_ms + 5, 50); // aumenta gradualmente
+                ESP_LOGW(TAG, "Buffer cheio (frame %lu pkt %u) -> delay=%dms",
+                        frame_counter, i, packet_delay_ms);
                 break;
             }
+        } else {
+            if (packet_delay_ms > 1) packet_delay_ms--; // recupera suavemente
+        }
 
-            vTaskDelay(pdMS_TO_TICKS(1)); // aliviar buffer
+            vTaskDelay(pdMS_TO_TICKS(packet_delay_ms));
         }
 
         esp_camera_fb_return(fb);
-        frame_counter++;
 
-        // Mantém taxa de 15 fps
-        int64_t frame_time = esp_timer_get_time() - frame_start;
-        if (frame_time < FRAME_INTERVAL_US) {
-            vTaskDelay(pdMS_TO_TICKS((FRAME_INTERVAL_US - frame_time) / 1000));
+        if (frame_ok) {
+            stable_frames++;
+            // A cada 30 frames bem-sucedidos, reduz o delay em 1 ms
+            if (stable_frames >= 30 && packet_delay_ms > 1) {
+                packet_delay_ms--;
+                stable_frames = 0;
+                ESP_LOGI(TAG, "Conexão estável — reduzindo delay para %d ms", packet_delay_ms);
+            }
+        } else {
+            stable_frames = 0;
         }
 
-        ESP_LOGD(TAG, "Frame %lu enviado (%u pacotes, %lld ms)",
-                 frame_counter, total_packets, frame_time / 1000);
+        frame_counter++;
+
+        // Mantém FPS desejado
+        int64_t elapsed = esp_timer_get_time() - frame_start;
+        if (elapsed < FRAME_INTERVAL_US) {
+            int delay_ms = (FRAME_INTERVAL_US - elapsed) / 1000;
+            if (delay_ms > 0) vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        }
+
+        ESP_LOGD(TAG, "Frame %lu enviado (%u pacotes, delay %d ms)", frame_counter, total_packets, packet_delay_ms);
     }
 
     close(sock);

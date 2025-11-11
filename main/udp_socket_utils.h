@@ -17,14 +17,15 @@
 #include "lwip/sockets.h"
 #include "lwip/sys.h"
 #include <lwip/netdb.h>
+#include <errno.h>
 
 #include "camera_utils.h"
 
 #define BROADCAST_IP_ADDR "255.255.255.255"
 #define BROADCAST_MSG  "HELLO"       // Mensagem de identificação da câmera
-#define RESPONSE_TIMEOUT_MS 5000     // Tempo máximo de espera por resposta
-#define PACKET_SIZE     1300         // Tamanho máximo do pacote UDP
-#define FPS_TARGET      15
+#define PACKET_SIZE     256         // Tamanho do payload UDP
+#define RESPONSE_TIMEOUT_MS 1000     // Tempo máximo de espera por resposta
+#define FPS_TARGET      5
 #define FRAME_INTERVAL_US (1000000 / FPS_TARGET)
 
 typedef struct {
