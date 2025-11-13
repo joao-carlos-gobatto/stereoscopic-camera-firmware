@@ -22,10 +22,10 @@
 #include "camera_utils.h"
 
 #define BROADCAST_IP_ADDR "255.255.255.255"
-#define BROADCAST_MSG  "HELLO"       // Mensagem de identificação da câmera
-#define PACKET_SIZE     256         // Tamanho do payload UDP
+#define BROADCAST_MSG  "ESP_DISCOVERY"       // Mensagem de identificação da câmera
+#define PACKET_SIZE     1024         // Tamanho do payload UDP
 #define RESPONSE_TIMEOUT_MS 1000     // Tempo máximo de espera por resposta
-#define FPS_TARGET      5
+#define FPS_TARGET      24
 #define FRAME_INTERVAL_US (1000000 / FPS_TARGET)
 
 typedef struct {

@@ -1,44 +1,55 @@
-import socket, struct, numpy as np, cv2, threading
+import socket
+import cv2
+import numpy as np
+import struct
 
-PORT = 8080
-DISCOVERY_RESPONSE = b"OK"
+# === CONFIGURAÇÕES ===
+UDP_PORT = 8080  # deve ser igual a CONFIG_UDP_STREAM_PORT
+BROADCAST_MSG = b"ESP_DISCOVERY"
+RESPONSE_MSG = b"SERVER_OK"
 
-def server_thread():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.bind(('', PORT))
-    print(f"[SERVER] Aguardando pacotes UDP na porta {PORT}...")
+# === SOCKET PRINCIPAL ===
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+sock.bind(("", UDP_PORT))
+sock.settimeout(0.5)
 
-    frame_buffer = {}
-    expected_packets = {}
+print(f"[SERVER] Servidor UDP iniciado na porta {UDP_PORT}")
 
-    while True:
-        packet, addr = sock.recvfrom(1500)
-        if len(packet) < 10:
-            # Mensagem curta → broadcast inicial
-            print(f"[DISCOVERY] Recebido '{packet.decode()}' de {addr}")
-            sock.sendto(DISCOVERY_RESPONSE, addr)
+esp_clients = set()
+current_frame = bytearray()
+
+# === LOOP PRINCIPAL ===
+while True:
+    try:
+        data, addr = sock.recvfrom(65535)
+
+        # --- ETAPA 1: DISCOVERY ---
+        if data == BROADCAST_MSG:
+            print(f"[DISCOVERY] Pedido recebido de {addr[0]}:{addr[1]}")
+            sock.sendto(RESPONSE_MSG, addr)
+            esp_clients.add(addr[0])
+            print(f"[DISCOVERY] Resposta enviada para {addr[0]}")
             continue
 
-        # Caso contrário → pacote de frame
-        frame_number, packet_id, total_packets = struct.unpack('<IHH', packet[:8])
-        data = packet[8:]
-
-        if frame_number not in frame_buffer:
-            frame_buffer[frame_number] = {}
-            expected_packets[frame_number] = total_packets
-
-        frame_buffer[frame_number][packet_id] = data
-
-        if len(frame_buffer[frame_number]) == total_packets:
-            chunks = [frame_buffer[frame_number][i] for i in range(total_packets)]
-            img_data = b''.join(chunks)
-            frame = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
+        # --- ETAPA 2: STREAMING ---
+        if addr[0] in esp_clients:
+            # Aqui estamos recebendo o buffer de camera_fb_t (dados brutos)
+            # Em alguns firmwares, isso é o JPEG diretamente, em outros, é o ponteiro. Teste!
+            # Tentamos decodificar diretamente como JPEG:
+            frame_data = bytearray(data)
+            frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            
             if frame is not None:
-                cv2.imshow("ESP32-CAM", frame)
-                cv2.waitKey(1)
-            del frame_buffer[frame_number]
-            del expected_packets[frame_number]
+                cv2.imshow(f"ESP32-CAM [{addr[0]}]", frame)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+            else:
+                print(f"[WARN] Frame inválido recebido de {addr[0]} (tamanho={len(data)})")
 
-if __name__ == "__main__":
-    server_thread()
+    except socket.timeout:
+        pass
+    except Exception as e:
+        print("[ERRO]", e)
+
+sock.close()
+cv2.destroyAllWindows()
