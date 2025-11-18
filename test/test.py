@@ -103,7 +103,7 @@ def display_thread(stop_event):
         frame_right = cv2.resize(frame_right, (new_w_r, target_h))
 
         # Cria canvas
-        canvas_w = 1200
+        canvas_w = 720
         canvas = np.zeros((target_h, canvas_w, 3), dtype=np.uint8)
 
         # Coloca câmera esquerda na esquerda
