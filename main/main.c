@@ -24,5 +24,5 @@ void app_main(void) {
     ESP_ERROR_CHECK(camera_startup());
 
     //Starts udp socket task
-    xTaskCreate(udp_discovery_task, "udp_discovery_task", 8192, NULL, 1, NULL);
+    xTaskCreate(udp_discovery_listener_task, "udp_discovery", 4096, NULL, 4, NULL);
 }

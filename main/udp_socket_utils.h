@@ -21,8 +21,6 @@
 
 #include "camera_utils.h"
 
-#define BROADCAST_IP_ADDR "255.255.255.255"
-#define BROADCAST_MSG  "ESP_DISCOVERY"       // Mensagem de identificação da câmera
 #define PACKET_SIZE     1024         // Tamanho do payload UDP
 #define RESPONSE_TIMEOUT_MS 1000     // Tempo máximo de espera por resposta
 #define FPS_TARGET      24
@@ -34,6 +32,6 @@ typedef struct {
     uint16_t total_packets;
 } __attribute__((packed)) frame_header_t;
 
-void udp_discovery_task(void *pvParameters);
+void udp_discovery_listener_task(void *pvParameters);
 
 #endif // UDP_SOCKET_UTILS_H

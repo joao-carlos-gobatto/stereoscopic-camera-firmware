@@ -1,205 +1,235 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Servidor UDP para streaming estéreo de duas ESP32-CAM (direita 8080 / esquerda 8081).
+- Descobre câmeras via broadcast periódico (porta 12345).
+- Exibe visão estéreo lado a lado.
+- Teclas: q = sair, s = salvar frames atuais.
+- Reconexão automática se câmera parar de enviar frames.
+"""
+
 import socket
 import cv2
 import numpy as np
 import threading
 import time
 from datetime import datetime
+import warnings
 
-# === CONFIGURAÇÕES ===
+# === CONFIGURAÇÕES GLOBAIS ===
 BROADCAST_MSG = b"ESP_DISCOVERY"
-RESPONSE_MSG = b"SERVER_OK"
+BROADCAST_ADDR = "255.255.255.255"
+BROADCAST_PORT = 12345
+
+STREAM_PORT_RIGHT = 8080
+STREAM_PORT_LEFT  = 8081
 
 CAMERAS = {
-    8080: {"name": "Câmera Direita",  "side": "right"},
-    8081: {"name": "Câmera Esquerda", "side": "left"}
+    STREAM_PORT_RIGHT: {"name": "Câmera Direita",  "side": "right"},
+    STREAM_PORT_LEFT:  {"name": "Câmera Esquerda", "side": "left"}
 }
 
+BROADCAST_INTERVAL = 2.0          # segundos entre broadcasts
+CAMERA_TIMEOUT     = 12.0         # segundos sem frame → considera desconectada
+DISPLAY_WINDOW     = "Visão Estéreo: Esquerda | Direita"
+DISPLAY_SIZE       = (1200, 480)
+
+# Variáveis compartilhadas (protegidas por lock)
 stop_event = threading.Event()
 frame_lock = threading.Lock()
-
-latest_frames = {port: None for port in CAMERAS.keys()}
-frame_timestamps = {port: 0.0 for port in CAMERAS.keys()}
-
-# === FPS ===
-fps_data = {
-    port: {
-        "frames": 0,
-        "last_time": time.time(),
-        "fps": 0.0
-    } for port in CAMERAS.keys()
-}
+latest_frames = {port: None for port in CAMERAS}
+frame_timestamps = {port: 0.0 for port in CAMERAS}
+fps_data = {port: {"frames": 0, "last_time": time.time(), "fps": 0.0} for port in CAMERAS}
+connected_cameras = set()  # portas que receberam pelo menos 1 frame
 
 
-# === UTIL ===
-def format_timestamp(ts):
+def format_timestamp(ts: float) -> str:
+    """Formata timestamp para nome de arquivo."""
     return datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
 
-# === RECEPÇÃO UDP ===
-def udp_receiver(port, camera_name, side, stop_event):
+def send_broadcast():
+    """Envia mensagem de broadcast periodicamente até ambas câmeras conectarem."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(1.0)
+
+    print("[BROADCAST] Iniciando envio periódico...")
+
+    while not stop_event.is_set() and len(connected_cameras) < 2:
+        try:
+            sock.sendto(BROADCAST_MSG, (BROADCAST_ADDR, BROADCAST_PORT))
+            print(f"[BROADCAST] Enviado ({len(connected_cameras)}/2 câmeras conectadas)")
+        except Exception as e:
+            print(f"[BROADCAST ERRO] {e}")
+        time.sleep(BROADCAST_INTERVAL)
+
+    print("[BROADCAST] Ambas câmeras conectadas ou parada → finalizando.")
+    sock.close()
+
+
+def stream_receiver(port: int, camera_name: str, side: str):
+    """Thread que recebe frames UDP de uma câmera específica."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", port))
     sock.settimeout(1.0)
 
-    esp_ips = set()
-    print(f"[SERVER] {camera_name} (porta {port}) aguardando conexão...")
+    print(f"[STREAM {side.upper()}] Aguardando frames na porta {port}...")
 
     while not stop_event.is_set():
         try:
             data, addr = sock.recvfrom(65535)
+            print(f"[RECEBIDO {side.upper()}] {len(data)} bytes de {addr}")
 
-            # DISCOVERY
-            if data == BROADCAST_MSG:
-                print(f"[DISCOVERY] {camera_name} conectada: {addr[0]}")
-                sock.sendto(RESPONSE_MSG, addr)
-                esp_ips.add(addr[0])
+            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                print(f"[ERRO DECODE {side.upper()}] JPEG inválido ou corrompido")
                 continue
 
-            # STREAM
-            if addr[0] in esp_ips:
-                frame = cv2.imdecode(
-                    np.frombuffer(data, dtype=np.uint8),
-                    cv2.IMREAD_COLOR
-                )
+            now = time.time()
+            with frame_lock:
+                latest_frames[port] = frame.copy()
+                frame_timestamps[port] = now
 
-                if frame is not None:
-                    now = time.time()
-                    with frame_lock:
-                        latest_frames[port] = frame.copy()
-                        frame_timestamps[port] = now
+                # Atualiza FPS
+                fps_data[port]["frames"] += 1
+                dt = now - fps_data[port]["last_time"]
+                if dt >= 1.0:
+                    fps_data[port]["fps"] = fps_data[port]["frames"] / dt
+                    fps_data[port]["frames"] = 0
+                    fps_data[port]["last_time"] = now
 
-                        # FPS
-                        fps_data[port]["frames"] += 1
-                        dt = now - fps_data[port]["last_time"]
-                        if dt >= 1.0:
-                            fps_data[port]["fps"] = fps_data[port]["frames"] / dt
-                            fps_data[port]["frames"] = 0
-                            fps_data[port]["last_time"] = now
+            if port not in connected_cameras:
+                print(f"[CONECTADA] {camera_name} ({addr[0]}) enviando frames")
+                connected_cameras.add(port)
 
         except socket.timeout:
             continue
         except Exception as e:
-            print(f"[ERRO] {camera_name}: {e}")
+            print(f"[ERRO {camera_name}] {e}")
 
     sock.close()
-    print(f"[SERVER] {camera_name} encerrada.")
+    print(f"[STREAM {side.upper()}] Encerrado.")
 
 
-# === DISPLAY ===
-def display_thread(stop_event):
-    window_name = "Visão Estéreo: Esquerda | Direita"
-    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(window_name, 1200, 480)
+def watchdog():
+    """Verifica periodicamente se alguma câmera parou de enviar frames."""
+    while not stop_event.is_set():
+        time.sleep(5.0)
+        now = time.time()
+        with frame_lock:
+            for port in list(connected_cameras):
+                if now - frame_timestamps[port] > CAMERA_TIMEOUT:
+                    print(f"[DESCONEXÃO] Porta {port} sem frames há >{CAMERA_TIMEOUT}s → removendo")
+                    connected_cameras.remove(port)
+                    latest_frames[port] = None
 
-    print("\n[DISPLAY]")
+
+def display_loop():
+    """Loop principal de exibição (deve rodar na thread principal para evitar warnings Qt)."""
+    cv2.namedWindow(DISPLAY_WINDOW, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(DISPLAY_WINDOW, *DISPLAY_SIZE)
+
+    print("\n[DISPLAY] Clique na janela e use:")
     print("  q → sair")
-    print("  s → salvar frames separados\n")
+    print("  s → salvar frames atuais\n")
 
     while not stop_event.is_set():
         with frame_lock:
-            frame_left = latest_frames[8081]
-            frame_right = latest_frames[8080]
-            fps_left = fps_data[8081]["fps"]
-            fps_right = fps_data[8080]["fps"]
+            left_frame  = latest_frames[STREAM_PORT_LEFT]
+            right_frame = latest_frames[STREAM_PORT_RIGHT]
+            fps_left    = fps_data[STREAM_PORT_LEFT]["fps"]
+            fps_right   = fps_data[STREAM_PORT_RIGHT]["fps"]
 
-        if frame_left is None or frame_right is None:
-            placeholder = np.zeros((240, 640, 3), np.uint8)
-            cv2.putText(
-                placeholder,
-                "Aguardando ambas as câmeras...",
-                (60, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
-                (0, 0, 255),
-                2
-            )
-            cv2.imshow(window_name, placeholder)
-            cv2.waitKey(1)
-            continue
+        if len(connected_cameras) < 2 or left_frame is None or right_frame is None:
+            placeholder = np.zeros((240, 640, 3), dtype=np.uint8)
+            msg = f"Aguardando câmeras... ({len(connected_cameras)}/2)"
+            cv2.putText(placeholder, msg, (60, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 180, 255), 2)
+            cv2.imshow(DISPLAY_WINDOW, placeholder)
+        else:
+            # Resize para visualização
+            left_resized  = cv2.resize(left_frame,  (320, 240))
+            right_resized = cv2.resize(right_frame, (320, 240))
 
-        # Resize fixo
-        frame_left_r = cv2.resize(frame_left, (320, 240))
-        frame_right_r = cv2.resize(frame_right, (320, 240))
+            # Canvas com linha divisória
+            canvas = np.hstack([left_resized, right_resized])
+            cv2.line(canvas, (320, 0), (320, 240), (200, 200, 200), 2)
 
-        canvas = np.zeros((240, 640, 3), dtype=np.uint8)
-        canvas[:, :320] = frame_left_r
-        canvas[:, 320:] = frame_right_r
+            # Rótulos e FPS
+            cv2.putText(canvas, "ESQUERDA", (10,  30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
+            cv2.putText(canvas, "DIREITA",  (330, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
+            cv2.putText(canvas, f"FPS: {fps_left:.1f}",  (180, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(canvas, f"FPS: {fps_right:.1f}", (500, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
-        cv2.line(canvas, (320, 0), (320, 240), (255, 255, 255), 2)
+            cv2.imshow(DISPLAY_WINDOW, canvas)
 
-        # Labels
-        cv2.putText(canvas, "ESQUERDA", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-        cv2.putText(canvas, "DIREITA", (330, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
-
-        # FPS
-        cv2.putText(canvas, f"{fps_left:.1f} FPS",
-                    (200, 230),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        cv2.putText(canvas, f"{fps_right:.1f} FPS",
-                    (520, 230),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-
-        cv2.imshow(window_name, canvas)
-
-        key = cv2.waitKey(1) & 0xFF
-
+        key = cv2.waitKey(10) & 0xFF
         if key == ord('q'):
+            print("[KEY] 'q' pressionado → saindo")
             stop_event.set()
-
         elif key == ord('s'):
             with frame_lock:
-                fl = latest_frames[8081]
-                fr = latest_frames[8080]
-                ts_l = frame_timestamps[8081]
-                ts_r = frame_timestamps[8080]
+                fl = latest_frames[STREAM_PORT_LEFT]
+                fr = latest_frames[STREAM_PORT_RIGHT]
+                tsl = frame_timestamps[STREAM_PORT_LEFT]
+                tsr = frame_timestamps[STREAM_PORT_RIGHT]
 
             if fl is not None and fr is not None:
-                name_l = f"{format_timestamp(ts_l)}_camera_esquerda.png"
-                name_r = f"{format_timestamp(ts_r)}_camera_direita.png"
-
-                cv2.imwrite(name_l, fl)
-                cv2.imwrite(name_r, fr)
-
-                print("[SALVO]")
-                print(f"  → {name_l}")
-                print(f"  → {name_r}")
+                nl = f"{format_timestamp(tsl)}_esquerda.png"
+                nr = f"{format_timestamp(tsr)}_direita.png"
+                cv2.imwrite(nl, fl)
+                cv2.imwrite(nr, fr)
+                print(f"[SALVO] {nl} e {nr}")
+            else:
+                print("[SALVAR] Frames não disponíveis ainda")
 
     cv2.destroyAllWindows()
-    print("[DISPLAY] Encerrado.")
+    print("[DISPLAY] Janela fechada.")
 
 
-# === THREADS ===
-threads = []
+def main():
+    """Função principal: inicia threads e gerencia o ciclo de vida."""
+    # Suprime warnings Qt conhecidos no shutdown
+    warnings.filterwarnings("ignore", category=RuntimeWarning, module="cv2")
 
-for port, info in CAMERAS.items():
-    t = threading.Thread(
-        target=udp_receiver,
-        args=(port, info["name"], info["side"], stop_event),
-        daemon=True
-    )
-    t.start()
-    threads.append(t)
+    threads = []
 
-display_t = threading.Thread(
-    target=display_thread,
-    args=(stop_event,),
-    daemon=True
-)
-display_t.start()
-threads.append(display_t)
+    # Broadcast (só até conectar as duas câmeras)
+    t_broadcast = threading.Thread(target=send_broadcast, daemon=True)
+    t_broadcast.start()
+    threads.append(t_broadcast)
 
-try:
-    while not stop_event.is_set():
-        time.sleep(0.1)
-except KeyboardInterrupt:
-    print("\nInterrompido pelo usuário.")
-finally:
-    stop_event.set()
-    for t in threads:
-        t.join()
+    # Receptores de stream
+    for port, info in CAMERAS.items():
+        t = threading.Thread(
+            target=stream_receiver,
+            args=(port, info["name"], info["side"]),
+            daemon=True
+        )
+        t.start()
+        threads.append(t)
 
-print("Servidor encerrado com sucesso.")
+    # Watchdog para desconexão
+    t_watchdog = threading.Thread(target=watchdog, daemon=True)
+    t_watchdog.start()
+    threads.append(t_watchdog)
+
+    print("Servidor iniciado. Pressione 'q' na janela para sair.\n")
+
+    try:
+        # Loop de display na thread principal (evita warnings Qt)
+        display_loop()
+    except KeyboardInterrupt:
+        print("\nInterrompido pelo usuário (Ctrl+C)")
+    finally:
+        stop_event.set()
+
+        # Aguarda threads terminarem
+        for t in threads:
+            t.join(timeout=3.0)
+
+        print("Servidor finalizado com sucesso.")
+
+
+if __name__ == "__main__":
+    main()
