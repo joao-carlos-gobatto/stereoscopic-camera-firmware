@@ -10,6 +10,7 @@ Servidor UDP para streaming estéreo de duas ESP32-CAM (direita 8080 / esquerda 
 
 import socket
 import cv2
+import os
 import numpy as np
 import threading
 import time
@@ -126,6 +127,11 @@ def watchdog():
 
 
 def display_loop():
+    picture_num = 0
+    os.rmdir("./stereoLeft")
+    os.rmdir("./stereoRight")
+    os.makedirs("stereoLeft", exist_ok=True)
+    os.makedirs("stereoRight", exist_ok=True)
     """Loop principal de exibição (deve rodar na thread principal para evitar warnings Qt)."""
     cv2.namedWindow(DISPLAY_WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(DISPLAY_WINDOW, *DISPLAY_SIZE)
@@ -171,15 +177,14 @@ def display_loop():
             with frame_lock:
                 fl = latest_frames[STREAM_PORT_LEFT]
                 fr = latest_frames[STREAM_PORT_RIGHT]
-                tsl = frame_timestamps[STREAM_PORT_LEFT]
-                tsr = frame_timestamps[STREAM_PORT_RIGHT]
 
             if fl is not None and fr is not None:
-                nl = f"{format_timestamp(tsl)}_esquerda.png"
-                nr = f"{format_timestamp(tsr)}_direita.png"
+                nl = f"./stereoLeft/{picture_num}.jpg"
+                nr = f"./stereoRight/{picture_num}.jpg"
                 cv2.imwrite(nl, fl)
                 cv2.imwrite(nr, fr)
                 print(f"[SALVO] {nl} e {nr}")
+                picture_num += 1
             else:
                 print("[SALVAR] Frames não disponíveis ainda")
 
