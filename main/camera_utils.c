@@ -40,13 +40,20 @@ esp_err_t camera_startup(void) {
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_exposure_ctrl(s, 1);  // Enable auto-exposure
-        s->set_aec2(s, 1);           // Enable DSP auto-exposure
-        s->set_ae_level(s, 0);       // Neutral auto-exposure level
-        s->set_gain_ctrl(s, 1);      // Enable auto-gain
-        s->set_whitebal(s, 1);       // Enable auto-white balance
-        s->set_awb_gain(s, 1);       // Enable AWB gain
-        s->set_wb_mode(s, 0);        // Auto WB mode
+        s->set_exposure_ctrl(s, 1);  // Enable auto-exposure (1 = enable)
+        s->set_aec2(s, 1);           // Enable DSP auto-exposure (1 = enable)
+        s->set_ae_level(s, 0);       // Neutral auto-exposure level (-2 to 2; start at 0)
+        s->set_gain_ctrl(s, 1);      // Enable auto-gain (1 = enable)
+        s->set_agc_gain(s, 0);       // Set max gain ceiling (0-30; 0 is minimal, adjust if needed)
+        s->set_lenc(s, 1);           // Enable lens correction (usually helps with color accuracy)
+        s->set_whitebal(s, 1);       // Enable auto-white balance (1 = enable)
+        s->set_awb_gain(s, 1);       // Enable AWB gain (1 = enable)
+        s->set_wb_mode(s, 0);        // Set white balance to auto mode (0 = auto; try this instead of 3 for better adaptation)
+        
+        // Optional additional tweaks for color correction (adjust -2 to 2 as needed after testing)
+        s->set_brightness(s, 0);     // Default brightness
+        s->set_contrast(s, 0);       // Default contrast
+        s->set_saturation(s, 0);     // Default saturation (increase to 1-2 if colors are washed out)
     }
     if (s == NULL) {
         ESP_LOGE(TAG, "Failed to get camera sensor");
