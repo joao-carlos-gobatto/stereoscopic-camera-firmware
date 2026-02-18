@@ -16,6 +16,7 @@ import threading
 import time
 from datetime import datetime
 import warnings
+import shutil
 
 # === CONFIGURAÇÕES GLOBAIS ===
 BROADCAST_MSG = b"ESP_DISCOVERY"
@@ -34,6 +35,18 @@ BROADCAST_INTERVAL = 2.0          # segundos entre broadcasts
 CAMERA_TIMEOUT     = 12.0         # segundos sem frame → considera desconectada
 DISPLAY_WINDOW     = "Visão Estéreo: Esquerda | Direita"
 DISPLAY_SIZE       = (1200, 480)
+
+
+#Calibration variables
+stereoRectificationMap = "stereoMap.xml"
+cv_file = cv2.FileStorage()
+cv_file.open(stereoRectificationMap,cv2.FileStorage_READ)
+
+Q = cv_file.getNode('q_matrix').mat()
+stereoMapL_x = cv_file.getNode('stereoMapL_x').mat()
+stereoMapL_y = cv_file.getNode('stereoMapL_y').mat()
+stereoMapR_x = cv_file.getNode('stereoMapR_x').mat()
+stereoMapR_y = cv_file.getNode('stereoMapR_y').mat()
 
 # Variáveis compartilhadas (protegidas por lock)
 stop_event = threading.Event()
@@ -125,16 +138,35 @@ def watchdog():
                     connected_cameras.remove(port)
                     latest_frames[port] = None
 
+def file_deletion(folder):
+    for filename in os.listdir(folder):
+        file_path = os.path.join(folder, filename)
+        try:
+            if os.path.isfile(file_path) or os.path.islink(file_path):
+                os.unlink(file_path)
+            elif os.path.isdir(file_path):
+                shutil.rmtree(file_path)
+        except Exception as e:
+            print('Failed to delete %s. Reason: %s' % (file_path, e))
+
 
 def display_loop():
     picture_num = 0
-    os.rmdir("./stereoLeft")
-    os.rmdir("./stereoRight")
-    os.makedirs("stereoLeft", exist_ok=True)
-    os.makedirs("stereoRight", exist_ok=True)
     """Loop principal de exibição (deve rodar na thread principal para evitar warnings Qt)."""
     cv2.namedWindow(DISPLAY_WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(DISPLAY_WINDOW, *DISPLAY_SIZE)
+
+    stereo = cv2.StereoSGBM.create(
+        minDisparity=0,
+        numDisparities=16*8,   # múltiplo de 16
+        blockSize=5,
+        P1=8 * 3 * 5**2,
+        P2=32 * 3 * 5**2,
+        disp12MaxDiff=1,
+        uniquenessRatio=10,
+        speckleWindowSize=100,
+        speckleRange=32
+    )
 
     print("\n[DISPLAY] Clique na janela e use:")
     print("  q → sair")
@@ -153,40 +185,68 @@ def display_loop():
             cv2.putText(placeholder, msg, (60, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 180, 255), 2)
             cv2.imshow(DISPLAY_WINDOW, placeholder)
         else:
+            rectified_left = cv2.remap(left_frame, stereoMapL_x, stereoMapL_y, cv2.INTER_LANCZOS4, cv2.BORDER_CONSTANT, 0)
+            rectified_right = cv2.remap(right_frame, stereoMapR_x, stereoMapR_y, cv2.INTER_LANCZOS4, cv2.BORDER_CONSTANT, 0)
+            grayL = cv2.cvtColor(rectified_left, cv2.COLOR_BGR2GRAY)
+            grayR = cv2.cvtColor(rectified_right, cv2.COLOR_BGR2GRAY)
+
+            disparity = stereo.compute(grayL, grayR).astype(np.float32) / 16.0
+            disparity[disparity <= 0] = np.nan
+
+            disp_vis = cv2.normalize(disparity, None, 0, 255, cv2.NORM_MINMAX)
+            disp_vis = disp_vis.astype(np.uint8)
+            cv2.imshow("Disparidade", disp_vis)
+
+            # points_3D = cv2.reprojectImageTo3D(disparity, Q)
+            # depth_map = points_3D[:, :, 2]
+
+            # mask = np.isfinite(depth_map)
+            # depth_filtered = np.zeros_like(depth_map)
+
+            # depth_filtered[mask] = depth_map[mask]
+            # depth_filtered = np.clip(depth_filtered, 0.5, 5.0)
+
+            # depth_norm = (depth_filtered - 0.5) / (5.0 - 0.5)
+            # depth_norm[~mask] = 0
+
+            # depth_vis = (depth_norm * 255).astype(np.uint8)
+
+            # depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_TURBO)
+
+            # cv2.imshow("Depth", depth_color)
+
             # Resize para visualização
-            left_resized  = cv2.resize(left_frame,  (320, 240))
-            right_resized = cv2.resize(right_frame, (320, 240))
+            # left_resized  = cv2.resize(left_frame,  (320, 240))
+            # right_resized = cv2.resize(right_frame, (320, 240))
 
-            # Canvas com linha divisória
-            canvas = np.hstack([left_resized, right_resized])
-            cv2.line(canvas, (320, 0), (320, 240), (200, 200, 200), 2)
+            # cv2.imshow("Depth Colorido", depth_color)
+            # cv2.imshow("Imagem Esquerda", left_resized)
+            # cv2.imshow("Imagem Direita", right_resized)
 
-            # Rótulos e FPS
-            cv2.putText(canvas, "ESQUERDA", (10,  30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
-            cv2.putText(canvas, "DIREITA",  (330, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
-            cv2.putText(canvas, f"FPS: {fps_left:.1f}",  (180, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(canvas, f"FPS: {fps_right:.1f}", (500, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            # cv2.imshow("Imagem Esquerda Retificada", rectified_left)
+            # cv2.imshow("Imagem Direita Retificada", rectified_right)
 
-            cv2.imshow(DISPLAY_WINDOW, canvas)
+            # cv2.imshow("Mapa de profundidade", depth_map)
+
 
         key = cv2.waitKey(10) & 0xFF
         if key == ord('q'):
             print("[KEY] 'q' pressionado → saindo")
             stop_event.set()
-        elif key == ord('s'):
-            with frame_lock:
-                fl = latest_frames[STREAM_PORT_LEFT]
-                fr = latest_frames[STREAM_PORT_RIGHT]
+        # elif key == ord('s'):
+        #     with frame_lock:
+        #         fl = latest_frames[STREAM_PORT_LEFT]
+        #         fr = latest_frames[STREAM_PORT_RIGHT]
 
-            if fl is not None and fr is not None:
-                nl = f"./stereoLeft/{picture_num}.jpg"
-                nr = f"./stereoRight/{picture_num}.jpg"
-                cv2.imwrite(nl, fl)
-                cv2.imwrite(nr, fr)
-                print(f"[SALVO] {nl} e {nr}")
-                picture_num += 1
-            else:
-                print("[SALVAR] Frames não disponíveis ainda")
+        #     if fl is not None and fr is not None:
+        #         nl = f"{leftCalibrationFolder}/{picture_num}.jpg"
+        #         nr = f"{rightCalibrationFolder}/{picture_num}.jpg"
+        #         cv2.imwrite(nl, fl)
+        #         cv2.imwrite(nr, fr)
+        #         print(f"[SALVO] {nl} e {nr}")
+        #         picture_num += 1
+        #     else:
+        #         print("[SALVAR] Frames não disponíveis ainda")
 
     cv2.destroyAllWindows()
     print("[DISPLAY] Janela fechada.")
