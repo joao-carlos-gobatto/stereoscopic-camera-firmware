@@ -21,7 +21,7 @@ camera_config_t photo_config = {
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_QVGA,
+    .frame_size = FRAMESIZE_VGA,
     .jpeg_quality = 12,
     .fb_count = 1,
     .grab_mode = CAMERA_GRAB_LATEST,
@@ -36,7 +36,7 @@ esp_err_t camera_startup(void) {
     } else {
         photo_config.fb_count = 1;
     }
-    photo_config.frame_size = FRAMESIZE_QVGA;
+    photo_config.frame_size = FRAMESIZE_VGA;
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
