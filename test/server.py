@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-Servidor UDP para streaming estéreo de duas ESP32-CAM (direita 8080 / esquerda 8081).
-- Descobre câmeras via broadcast periódico (porta 12345).
-- Exibe visão estéreo lado a lado.
-- Teclas: q = sair, s = salvar frames atuais.
-- Reconexão automática se câmera parar de enviar frames.
+Servidor UDP para streaming estéreo de duas ESP32-CAM
+Direita -> porta 8080
+Esquerda -> porta 8081
+
+Recursos:
+- Descoberta automática via broadcast
+- Visualização estéreo lado a lado (VGA)
+- FPS por câmera
+- Reconexão automática
+- Salvar pares de imagens para calibração
+
+Teclas:
+q -> sair
+s -> salvar par de imagens
 """
 
 import socket
@@ -18,260 +28,376 @@ from datetime import datetime
 import warnings
 import shutil
 
-# === CONFIGURAÇÕES GLOBAIS ===
+
+# ==============================
+# CONFIGURAÇÕES
+# ==============================
+
 BROADCAST_MSG = b"ESP_DISCOVERY"
-BROADCAST_ADDR = "255.255.255.255"
+BROADCAST_ADDR = "192.168.15.255"
 BROADCAST_PORT = 12345
 
 STREAM_PORT_RIGHT = 8080
 STREAM_PORT_LEFT  = 8081
 
 CAMERAS = {
-    STREAM_PORT_RIGHT: {"name": "Câmera Direita",  "side": "right"},
+    STREAM_PORT_RIGHT: {"name": "Câmera Direita", "side": "right"},
     STREAM_PORT_LEFT:  {"name": "Câmera Esquerda", "side": "left"}
 }
 
-BROADCAST_INTERVAL = 2.0          # segundos entre broadcasts
-CAMERA_TIMEOUT     = 12.0         # segundos sem frame → considera desconectada
-DISPLAY_WINDOW     = "Visão Estéreo: Esquerda | Direita"
-DISPLAY_SIZE       = (1200, 480)
+BROADCAST_INTERVAL = 2.0
+CAMERA_TIMEOUT = 12.0
 
-rightCalibrationFolder = "stereoCalibrationRight"
+# resolução VGA
+FRAME_WIDTH = 640
+FRAME_HEIGHT = 480
+
+DISPLAY_WINDOW = "Visão Estéreo"
+DISPLAY_SIZE = (FRAME_WIDTH * 2, FRAME_HEIGHT)
+
 leftCalibrationFolder = "stereoCalibrationLeft"
-stereoRectificationMap = "stereoMap.xml"
+rightCalibrationFolder = "stereoCalibrationRight"
 
-#Calibration variables
-CALIBRATION_DONE = False
-stereoMapL_x = []
-stereoMapL_y = []
-stereoMapR_x = []
-stereoMapR_y = []
 
-# Variáveis compartilhadas (protegidas por lock)
+# ==============================
+# VARIÁVEIS COMPARTILHADAS
+# ==============================
+
 stop_event = threading.Event()
+
 frame_lock = threading.Lock()
+
 latest_frames = {port: None for port in CAMERAS}
 frame_timestamps = {port: 0.0 for port in CAMERAS}
-fps_data = {port: {"frames": 0, "last_time": time.time(), "fps": 0.0} for port in CAMERAS}
-connected_cameras = set()  # portas que receberam pelo menos 1 frame
 
+fps_data = {
+    port: {"frames": 0, "last_time": time.time(), "fps": 0.0}
+    for port in CAMERAS
+}
+
+connected_cameras = set()
+
+
+# ==============================
+# UTILIDADES
+# ==============================
 
 def format_timestamp(ts: float) -> str:
-    """Formata timestamp para nome de arquivo."""
     return datetime.fromtimestamp(ts).strftime("%Y%m%d_%H%M%S_%f")[:-3]
 
 
+def delete_folder_contents(folder):
+
+    if not os.path.isdir(folder):
+        return
+
+    for filename in os.listdir(folder):
+
+        path = os.path.join(folder, filename)
+
+        try:
+
+            if os.path.isfile(path) or os.path.islink(path):
+                os.unlink(path)
+
+            elif os.path.isdir(path):
+                shutil.rmtree(path)
+
+        except Exception as e:
+            print("Erro ao deletar", path, e)
+
+
+def stereo_calibration_setup():
+
+    os.makedirs(leftCalibrationFolder, exist_ok=True)
+    os.makedirs(rightCalibrationFolder, exist_ok=True)
+
+    delete_folder_contents(leftCalibrationFolder)
+    delete_folder_contents(rightCalibrationFolder)
+
+    print("Pastas de calibração prontas")
+
+
+# ==============================
+# BROADCAST
+# ==============================
+
 def send_broadcast():
-    """Envia mensagem de broadcast periodicamente até ambas câmeras conectarem."""
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    sock.settimeout(1.0)
 
-    print("[BROADCAST] Iniciando envio periódico...")
+    print("[BROADCAST] iniciado")
 
     while not stop_event.is_set() and len(connected_cameras) < 2:
+
         try:
+
             sock.sendto(BROADCAST_MSG, (BROADCAST_ADDR, BROADCAST_PORT))
-            print(f"[BROADCAST] Enviado ({len(connected_cameras)}/2 câmeras conectadas)")
+
+            print(f"[BROADCAST] enviado ({len(connected_cameras)}/2 conectadas)")
+
         except Exception as e:
-            print(f"[BROADCAST ERRO] {e}")
+
+            print("Erro broadcast:", e)
+
         time.sleep(BROADCAST_INTERVAL)
 
-    print("[BROADCAST] Ambas câmeras conectadas ou parada → finalizando.")
     sock.close()
 
 
-def stream_receiver(port: int, camera_name: str, side: str):
-    """Thread que recebe frames UDP de uma câmera específica."""
+# ==============================
+# RECEPÇÃO DE STREAM
+# ==============================
+
+def stream_receiver(port, camera_name, side):
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", port))
     sock.settimeout(1.0)
 
-    print(f"[STREAM {side.upper()}] Aguardando frames na porta {port}...")
+    print(f"[STREAM {side.upper()}] aguardando porta {port}")
 
     while not stop_event.is_set():
-        try:
-            data, addr = sock.recvfrom(65535)
-            print(f"[RECEBIDO {side.upper()}] {len(data)} bytes de {addr}")
 
-            frame = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        try:
+
+            data, addr = sock.recvfrom(65535)
+
+            frame = cv2.imdecode(
+                np.frombuffer(data, np.uint8),
+                cv2.IMREAD_COLOR
+            )
+
             if frame is None:
-                print(f"[ERRO DECODE {side.upper()}] JPEG inválido ou corrompido")
                 continue
 
             now = time.time()
+
             with frame_lock:
+
                 latest_frames[port] = frame.copy()
                 frame_timestamps[port] = now
 
-                # Atualiza FPS
                 fps_data[port]["frames"] += 1
+
                 dt = now - fps_data[port]["last_time"]
+
                 if dt >= 1.0:
+
                     fps_data[port]["fps"] = fps_data[port]["frames"] / dt
                     fps_data[port]["frames"] = 0
                     fps_data[port]["last_time"] = now
 
             if port not in connected_cameras:
-                print(f"[CONECTADA] {camera_name} ({addr[0]}) enviando frames")
+
+                print(f"[CONECTADA] {camera_name} {addr[0]}")
                 connected_cameras.add(port)
 
         except socket.timeout:
             continue
+
         except Exception as e:
-            print(f"[ERRO {camera_name}] {e}")
+            print("Erro stream:", e)
 
     sock.close()
-    print(f"[STREAM {side.upper()}] Encerrado.")
 
+
+# ==============================
+# WATCHDOG
+# ==============================
 
 def watchdog():
-    """Verifica periodicamente se alguma câmera parou de enviar frames."""
+
     while not stop_event.is_set():
-        time.sleep(5.0)
+
+        time.sleep(5)
+
         now = time.time()
+
         with frame_lock:
+
             for port in list(connected_cameras):
+
                 if now - frame_timestamps[port] > CAMERA_TIMEOUT:
-                    print(f"[DESCONEXÃO] Porta {port} sem frames há >{CAMERA_TIMEOUT}s → removendo")
+
+                    print("Câmera desconectada porta", port)
+
                     connected_cameras.remove(port)
                     latest_frames[port] = None
 
-def file_deletion(folder):
-    for filename in os.listdir(folder):
-        file_path = os.path.join(folder, filename)
-        try:
-            if os.path.isfile(file_path) or os.path.islink(file_path):
-                os.unlink(file_path)
-            elif os.path.isdir(file_path):
-                shutil.rmtree(file_path)
-        except Exception as e:
-            print('Failed to delete %s. Reason: %s' % (file_path, e))
 
-
-def stereo_calibration_setup():
-    if os.path.isdir(leftCalibrationFolder) and os.path.isdir(rightCalibrationFolder):
-        print("Folders Exist")
-        file_deletion(leftCalibrationFolder)
-        file_deletion(rightCalibrationFolder)
-    elif not os.path.isdir(leftCalibrationFolder) and os.path.isdir(rightCalibrationFolder):
-        print("Left folder don't exist")
-        os.makedirs(leftCalibrationFolder)
-        file_deletion(rightCalibrationFolder)
-    elif os.path.isdir(leftCalibrationFolder) and not os.path.isdir(rightCalibrationFolder):
-        print("Right folder don't exist")
-        os.makedirs(rightCalibrationFolder)
-        file_deletion(leftCalibrationFolder)
-    else:
-        print("None of the folders exist")
-        os.makedirs(leftCalibrationFolder, exist_ok=True)
-        os.makedirs(rightCalibrationFolder, exist_ok=True)
-
+# ==============================
+# DISPLAY
+# ==============================
 
 def display_loop():
+
     picture_num = 0
-    """Loop principal de exibição (deve rodar na thread principal para evitar warnings Qt)."""
+
     cv2.namedWindow(DISPLAY_WINDOW, cv2.WINDOW_NORMAL)
     cv2.resizeWindow(DISPLAY_WINDOW, *DISPLAY_SIZE)
 
-    print("\n[DISPLAY] Clique na janela e use:")
-    print("  q → sair")
-    print("  s → salvar frames atuais\n")
+    print("Pressione q para sair")
+    print("Pressione s para salvar imagens")
 
     while not stop_event.is_set():
+
         with frame_lock:
-            left_frame  = latest_frames[STREAM_PORT_LEFT]
-            right_frame = latest_frames[STREAM_PORT_RIGHT]
-            fps_left    = fps_data[STREAM_PORT_LEFT]["fps"]
-            fps_right   = fps_data[STREAM_PORT_RIGHT]["fps"]
 
-        if len(connected_cameras) < 2 or left_frame is None or right_frame is None:
-            placeholder = np.zeros((240, 640, 3), dtype=np.uint8)
-            msg = f"Aguardando câmeras... ({len(connected_cameras)}/2)"
-            cv2.putText(placeholder, msg, (60, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 180, 255), 2)
+            left = latest_frames[STREAM_PORT_LEFT]
+            right = latest_frames[STREAM_PORT_RIGHT]
+
+            fps_left = fps_data[STREAM_PORT_LEFT]["fps"]
+            fps_right = fps_data[STREAM_PORT_RIGHT]["fps"]
+
+        if left is None or right is None:
+
+            placeholder = np.zeros((FRAME_HEIGHT, FRAME_WIDTH * 2, 3), dtype=np.uint8)
+
+            msg = f"Aguardando cameras ({len(connected_cameras)}/2)"
+
+            cv2.putText(
+                placeholder,
+                msg,
+                (FRAME_WIDTH * 2 // 3, FRAME_HEIGHT // 2),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,180,255),
+                2
+            )
+
             cv2.imshow(DISPLAY_WINDOW, placeholder)
+
         else:
-            # Resize para visualização
-            left_resized  = cv2.resize(left_frame,  (320, 240))
-            right_resized = cv2.resize(right_frame, (320, 240))
 
-            # Canvas com linha divisória
-            canvas = np.hstack([left_resized, right_resized])
-            cv2.line(canvas, (320, 0), (320, 240), (200, 200, 200), 2)
+            canvas = np.hstack([left, right])
 
-            # Rótulos e FPS
-            cv2.putText(canvas, "ESQUERDA", (10,  30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
-            cv2.putText(canvas, "DIREITA",  (330, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 100), 2)
-            cv2.putText(canvas, f"FPS: {fps_left:.1f}",  (180, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            cv2.putText(canvas, f"FPS: {fps_right:.1f}", (500, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.line(
+                canvas,
+                (FRAME_WIDTH, 0),
+                (FRAME_WIDTH, FRAME_HEIGHT),
+                (200,200,200),
+                2
+            )
+
+            cv2.putText(
+                canvas,
+                "ESQUERDA",
+                (10,40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,255,100),
+                2
+            )
+
+            cv2.putText(
+                canvas,
+                "DIREITA",
+                (FRAME_WIDTH + 10,40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0,255,100),
+                2
+            )
+
+            cv2.putText(
+                canvas,
+                f"FPS: {fps_left:.1f}",
+                (10, FRAME_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0,255,255),
+                2
+            )
+
+            cv2.putText(
+                canvas,
+                f"FPS: {fps_right:.1f}",
+                (FRAME_WIDTH + 10, FRAME_HEIGHT - 20),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0,255,255),
+                2
+            )
 
             cv2.imshow(DISPLAY_WINDOW, canvas)
 
         key = cv2.waitKey(10) & 0xFF
+
         if key == ord('q'):
-            print("[KEY] 'q' pressionado → saindo")
+
             stop_event.set()
+
         elif key == ord('s'):
+
             with frame_lock:
+
                 fl = latest_frames[STREAM_PORT_LEFT]
                 fr = latest_frames[STREAM_PORT_RIGHT]
 
             if fl is not None and fr is not None:
-                nl = f"{leftCalibrationFolder}/{picture_num}.jpg"
-                nr = f"{rightCalibrationFolder}/{picture_num}.jpg"
-                cv2.imwrite(nl, fl)
-                cv2.imwrite(nr, fr)
-                print(f"[SALVO] {nl} e {nr}")
+
+                name_l = f"{leftCalibrationFolder}/{picture_num}.jpg"
+                name_r = f"{rightCalibrationFolder}/{picture_num}.jpg"
+
+                cv2.imwrite(name_l, fl)
+                cv2.imwrite(name_r, fr)
+
+                print("Salvo:", name_l, name_r)
+
                 picture_num += 1
-            else:
-                print("[SALVAR] Frames não disponíveis ainda")
 
     cv2.destroyAllWindows()
-    print("[DISPLAY] Janela fechada.")
 
+
+# ==============================
+# MAIN
+# ==============================
 
 def main():
-    """Função principal: inicia threads e gerencia o ciclo de vida."""
-    # Suprime warnings Qt conhecidos no shutdown
+
     warnings.filterwarnings("ignore", category=RuntimeWarning, module="cv2")
+
+    stereo_calibration_setup()
 
     threads = []
 
-    # Broadcast (só até conectar as duas câmeras)
-    t_broadcast = threading.Thread(target=send_broadcast, daemon=True)
-    t_broadcast.start()
-    threads.append(t_broadcast)
+    t = threading.Thread(target=send_broadcast, daemon=True)
+    t.start()
+    threads.append(t)
 
-    # Receptores de stream
     for port, info in CAMERAS.items():
+
         t = threading.Thread(
             target=stream_receiver,
             args=(port, info["name"], info["side"]),
             daemon=True
         )
+
         t.start()
         threads.append(t)
 
-    # Watchdog para desconexão
-    t_watchdog = threading.Thread(target=watchdog, daemon=True)
-    t_watchdog.start()
-    threads.append(t_watchdog)
-
-    print("Servidor iniciado. Pressione 'q' na janela para sair.\n")
+    t = threading.Thread(target=watchdog, daemon=True)
+    t.start()
+    threads.append(t)
 
     try:
-        # Loop de display na thread principal (evita warnings Qt)
+
         display_loop()
+
     except KeyboardInterrupt:
-        print("\nInterrompido pelo usuário (Ctrl+C)")
+
+        print("Interrompido")
+
     finally:
+
         stop_event.set()
 
-        # Aguarda threads terminarem
         for t in threads:
-            t.join(timeout=3.0)
+            t.join(timeout=2)
 
-        print("Servidor finalizado com sucesso.")
+        print("Servidor finalizado")
 
 
 if __name__ == "__main__":
