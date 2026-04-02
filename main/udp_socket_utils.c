@@ -46,7 +46,7 @@ void udp_stream_task(void *pvParameters)
 
         esp_camera_fb_return(fb);
 
-        vTaskDelay(pdMS_TO_TICKS(FRAME_INTERVAL_US / 1000));  // seu intervalo de frames
+        vTaskDelay(pdMS_TO_TICKS(FRAME_INTERVAL_US / 1000));
     }
 
     close(sock);
