@@ -1,5 +1,6 @@
 # ESP-IDF Build
 build/
+managed_components/
 
 # SDKConfig
 sdkconfig
