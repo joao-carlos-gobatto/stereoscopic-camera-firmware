@@ -5,8 +5,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#include "uart_utils.h"
 #include "camera_utils.h"
+#include "wifi_utils.h"
+#include "udp_socket_utils.h"
 
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
@@ -16,9 +17,12 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
 
-    ESP_ERROR_CHECK(uart_init());
+    //Starts up wifi
+    wifi_init_sta();
 
-    camera_startup();
+    //Starts up camera
+    ESP_ERROR_CHECK(camera_startup());
 
-    xTaskCreatePinnedToCore(uart_rx_task, "uart_rx_task", 8192, NULL, 2, NULL, 0);
+    //Starts udp socket task
+    xTaskCreate(udp_discovery_listener_task, "udp_discovery", 4096, NULL, 4, NULL);
 }

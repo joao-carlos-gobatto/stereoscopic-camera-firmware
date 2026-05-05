@@ -21,7 +21,7 @@ camera_config_t photo_config = {
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_QVGA,
+    .frame_size = FRAMESIZE_VGA,
     .jpeg_quality = 12,
     .fb_count = 1,
     .grab_mode = CAMERA_GRAB_LATEST,
@@ -30,82 +30,53 @@ camera_config_t photo_config = {
 
 static const char *TAG = "camera_driver";
 
-picture_t *capture_image(void) {
-    // Returns a frame_buffer to the backend driver
-    esp_camera_fb_return(esp_camera_fb_get());
-    camera_fb_t *pic = esp_camera_fb_get();
-    if (!pic) {
-        ESP_LOGE(TAG, "Failed to capture image");
-        return NULL;
-    }
-
-    picture_t *picture = malloc(sizeof(picture_t));
-    if (picture == NULL) {
-        ESP_LOGE(TAG, "Error allocating picture struct");
-        esp_camera_fb_return(pic);
-        return NULL;
-    }
-
-    uint8_t *buf = malloc(pic->len);
-    if (buf == NULL) {
-        ESP_LOGE(TAG, "Error allocating picture buffer");
-        free(picture);
-        esp_camera_fb_return(pic);
-        return NULL;
-    }
-
-    memcpy(buf, pic->buf, pic->len);
-    picture->buf = buf;
-    picture->len = pic->len;
-    esp_camera_fb_return(pic);
-    return picture;
-}
-
-esp_err_t camera_sensors_warmup(void) {
-    ESP_LOGI(TAG, "Warming up camera...");
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-    int fail_count = 0;
-    for (int i = 0; i < CONFIG_CAMERA_SENSOR_WARMUP_FRAMES; i++) {
-        picture_t *pic = capture_image();
-        if (pic) {
-            free(pic->buf);
-            free(pic);
-        } else {    
-            ESP_LOGE(TAG, "Warmup frame %d failed", i);
-            if (++fail_count > CONFIG_CAMERA_SENSOR_WARMUP_FRAMES / 2) {
-                ESP_LOGE(TAG, "Too many warmup failures, aborting");
-                return ESP_FAIL;
-            }
-        }
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-    }
-    return ESP_OK;
-}
-
 esp_err_t camera_startup(void) {
     if (esp_psram_is_initialized()) {
         photo_config.fb_count = 2; //Improve frame rate with PSRAM
     } else {
         photo_config.fb_count = 1;
-        photo_config.frame_size = FRAMESIZE_SVGA; // Fallback if no PSRAM
     }
+    photo_config.frame_size = FRAMESIZE_VGA;
     ESP_ERROR_CHECK(esp_camera_init(&photo_config));
     sensor_t *s = esp_camera_sensor_get();
     if (s != NULL) {
-        s->set_exposure_ctrl(s, 1);  // Enable auto-exposure
-        s->set_aec2(s, 1);           // Enable DSP auto-exposure
-        s->set_ae_level(s, 0);       // Neutral auto-exposure level
-        s->set_gain_ctrl(s, 1);      // Enable auto-gain
-        s->set_whitebal(s, 1);       // Enable auto-white balance
-        s->set_awb_gain(s, 1);       // Enable AWB gain
-        s->set_wb_mode(s, 0);        // Auto WB mode
+        // --- Disable all auto features for full manual control ---
+        s->set_exposure_ctrl(s, 1);   // [0=manual, 1=auto] Exposure control
+        s->set_aec2(s, 1);            // [0=manual, 1=auto] DSP auto-exposure
+        s->set_gain_ctrl(s, 1);       // [0=manual, 1=auto] Gain control
+        s->set_whitebal(s, 1);        // [0=manual, 1=auto] White balance
+        s->set_awb_gain(s, 1);        // [0=manual, 1=auto] AWB gain
+
+        // Exposure (brightness/light sensitivity):
+        //   Range: 0–1200 (higher = brighter, try 300–1200)
+        // s->set_aec_value(s, 300); // Exposure time
+
+        // Gain (sensor sensitivity):
+        //   Range: 0–30 (higher = more sensitive, more noise)
+        // s->set_agc_gain(s, 5); // Manual gain
+
+        // White balance mode:
+        //   0: Auto, 1: Sunny, 2: Cloudy, 3: Office, 4: Home
+        // s->set_wb_mode(s, 1); // Fixed white balance (1 = sunny)
+
+        // Brightness: -2 to 2
+        // s->set_brightness(s, 0);
+        // Contrast: -2 to 2
+        // s->set_contrast(s, 0);
+        // Saturation: -2 to 2
+        // s->set_saturation(s, 0);
+        // Sharpness: -2 to 2 (if supported)
+        // if (s->set_sharpness) s->set_sharpness(s, 0);
+
+        // Lens correction: 1=enable, 0=disable
+        // s->set_lenc(s, 1);
+
+        // s->set_special_effect(s, 2); // Grayscale
     }
     if (s == NULL) {
         ESP_LOGE(TAG, "Failed to get camera sensor");
         return ESP_FAIL;
     }
-    camera_sensors_warmup();
-    ESP_LOGI(TAG, "Camera warmed up");
     return ESP_OK;
 }
 
