@@ -18,7 +18,6 @@ menu "Project Specific Configuration"
       default "30"
       help
           Number of frames to be captured and discarded while the camera sensor adjusts its internal parameters (e.g. exposure, white balance, etc.) during initialization.
-          
     menu "Pin Configuration"
       config D0
         int "D0"
